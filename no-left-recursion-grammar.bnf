@@ -1,0 +1,47 @@
+ program ::= extern_list decl_list 
+           | decl_list
+  extern_list ::= extern extern_list
+               |  extern
+  extern ::= "extern" type_spec IDENT "(" params ")" ";"
+  decl_list ::= decl decl_list
+             |  decl
+  decl ::= var_decl 
+        |  fun_decl
+  var_decl ::= var_type IDENT ";" 
+  type_spec ::= "void"
+             |  var_type           
+  var_type  ::= "int" |  "float" |  "bool"
+  fun_decl ::= type_spec IDENT "(" params ")" block
+  params ::= param_list  
+          |  "void" | epsilon
+  param_list ::= param param_list2
+  param_list2 ::= "," param param_list | epsilon
+  param ::= var_type IDENT
+  block ::= "{" local_decls stmt_list "}"
+  local_decls ::= local_decl local_decls
+               |  epsilon
+  local_decl ::= var_type IDENT ";"
+  stmt_list ::= stmt stmt_list
+             |  epsilon
+  stmt ::= expr_stmt 
+        |  block 
+        |  if_stmt 
+        |  while_stmt 
+        |  return_stmt
+  expr_stmt ::= expr ";" 
+             |  ";"
+  while_stmt ::= "while" "(" expr ")" stmt 
+  if_stmt ::= "if" "(" expr ")" block else_stmt
+  else_stmt  ::= "else" block
+              |  epsilon
+  return_stmt ::= "return" ";" 
+               |  "return" expr ";"               
+  # operators in order of increasing precedence      
+  expr ::= IDENT "=" expr
+        | rval
+  rval ::= "-" rval rval2 | "!" rval rval2 | "(" expr ")" rval2 | IDENT rval2 | IDENT "(" args ")" rval2 | INT_LIT rval2 | FLOAT_LIT rval2 | BOOL_LIT rval2
+  rval2 ::= "||" rval rval2 | "&&" rval rval2 | "==" rval rval2 | "!=" rval rval2 | "<=" rval rval2 | "<" rval rval2 | ">=" rval rval2 | ">" rval rval2 | "+" rval rval2 | "-" rval rval2 | "*" rval rval2 | "/" rval rval2 | "%" rval rval2 | epsilon
+  args ::= arg_list 
+        |  epsilon
+  arg_list ::= expr arg_list2
+  arg_list2 ::= "," expr arg_list2 | epsilon
