@@ -1,0 +1,40 @@
+program = {"eof"}
+extern_list = {"int", "float", "bool", "void"}
+extern = {"int", "float", "bool", "void", "extern"}
+decl_list = {"eof"}
+decl = {"eof", "int", "float", "bool", "void"}
+var_decl = {"eof", "int", "float", "bool", "void"}
+type_spec = {IDENT}
+var_type = {IDENT}
+fun_decl = {"eof", "int", "float", "bool", "void"}
+params = {")"}
+param_list = {",", ")"}
+param_list2 = {",", ")"}
+param = {",", ")"}
+local_decls = {";", IDENT, "-", "!", "(", INT_LIT, FLOAT_LIT, BOOL_LIT, "{", "if", "while", "return", "}"}
+local_decl = {"int", "float", "bool"}
+stmt_list = {"}"}
+stmt = {";", IDENT, "-", "!", "(", INT_LIT, FLOAT_LIT, BOOL_LIT, "{", "if", "while", "return", "}"}
+expr_stmt = {";", IDENT, "-", "!", "(", INT_LIT, FLOAT_LIT, BOOL_LIT, "{", "if", "while", "return", "}"}
+while_stmt = {";", IDENT, "-", "!", "(", INT_LIT, FLOAT_LIT, BOOL_LIT, "{", "if", "while", "return", "}"}
+if_stmt = {";", IDENT, "-", "!", "(", INT_LIT, FLOAT_LIT, BOOL_LIT, "{", "if", "while", "return", "}"}
+else_stmt = {";", IDENT, "-", "!", "(", INT_LIT, FLOAT_LIT, BOOL_LIT, "{", "if", "while", "return", "}"}
+return_stmt = {";", IDENT, "-", "!", "(", INT_LIT, FLOAT_LIT, BOOL_LIT, "{", "if", "while", "return", "}"}
+block = {";", IDENT, "-", "!", "(", INT_LIT, FLOAT_LIT, BOOL_LIT, "{", "if", "while", "return", "}", "eof", "int", "float", "bool", "void"}
+args = {")"}
+arg_list = {")"}
+arg_list2 = {")"}
+expr = {";", ")", ","}
+rval = {";", ")", ","}
+rval2 = {";", ")", ","}
+term = {"||", ";", ")", ","}
+term2 = {"||", ";", ")", ","}
+equiv = {"&&", "||", ";", ")", ","}
+equiv2 = {"&&", "||", ";", ")", ","}
+rel = {"==", "!=", "&&", "||", ";", ")", ","}
+rel2 = {"==", "!=", "&&", "||", ";", ")", ","}
+subexpr = {"<=", "<", ">=", ">", "==", "!=", "&&", "||", ";", ")", ","}
+subexpr2 = {"<=", "<", ">=", ">", "==", "!=", "&&", "||", ";", ")", ","}
+factor = {"+", "-", "<=", "<", ">=", ">", "==", "!=", "&&", "||", ";", ")", ","}
+factor2 = {"+", "-", "<=", "<", ">=", ">", "==", "!=", "&&", "||", ";", ")", ","}
+element = {"*", "/", "%", "+", "-", "<=", "<", ">=", ">", "==", "!=", "&&", "||", ";", ")", ","}

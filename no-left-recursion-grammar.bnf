@@ -36,11 +36,30 @@
               |  epsilon
   return_stmt ::= "return" ";" 
                |  "return" expr ";"               
-  # operators in order of increasing precedence      
+  # operators in order of increasing precedence    CANCER   
   expr ::= IDENT "=" expr
         | rval
-  rval ::= "-" rval rval2 | "!" rval rval2 | "(" expr ")" rval2 | IDENT rval2 | IDENT "(" args ")" rval2 | INT_LIT rval2 | FLOAT_LIT rval2 | BOOL_LIT rval2
-  rval2 ::= "||" rval rval2 | "&&" rval rval2 | "==" rval rval2 | "!=" rval rval2 | "<=" rval rval2 | "<" rval rval2 | ">=" rval rval2 | ">" rval rval2 | "+" rval rval2 | "-" rval rval2 | "*" rval rval2 | "/" rval rval2 | "%" rval rval2 | epsilon
+
+  rval ::= term rval2
+  rval2 ::= "||" term rval2 | epsilon
+
+  term ::= equiv term2
+  term2 ::= "&&" equiv term2 | epsilon
+
+  equiv ::= rel equiv2
+  equiv2 ::= "==" rel equiv2 | "!=" rel equiv2 | epsilon
+
+  rel ::= subexpr rel2
+  rel2 ::= "<=" subexpr rel2 | "<" subexpr rel2 | ">=" subexpr rel2 | ">" subexpr rel2 | epsilon
+
+  subexpr ::= factor subexpr2
+  subexpr2 ::= "+" factor subexpr2 | "-" factor subexpr2 | epsilon
+
+  factor ::= element factor2
+  factor2 ::= "*" element factor2 | "/" element factor2 | "%" element factor2 | epsilon
+  
+  element ::= "-" element | "!" element | "(" expr ")" | IDENT | IDENT "(" args ")" | INT_LIT | FLOAT_LIT | BOOL_LIT
+
   args ::= arg_list 
         |  epsilon
   arg_list ::= expr arg_list2
