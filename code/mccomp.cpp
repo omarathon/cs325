@@ -414,22 +414,22 @@ public:
 };
 
 class VarDeclASTnode : public ASTnode {
-  std::string Type; // may not be void
+  TOKEN_TYPE Type; // may not be void
   std::string Value; // Identifier
   TOKEN Tok;
 
 public:
-  VarDeclASTnode(TOKEN tok, std::string type, std::string value) : Tok(tok), Type(type), Value(value) {}
+  VarDeclASTnode(TOKEN tok, TOKEN_TYPE type, std::string value) : Tok(tok), Type(type), Value(value) {}
   // virtual Value *codegen() override;
 };
 
 class ParamASTnode : public ASTnode {
-  std::string Type; // may not be void
+  TOKEN_TYPE Type; // may not be void
   std::string Value; // Identifier
   TOKEN Tok;
 
 public:
-  ParamASTnode(TOKEN tok, std::string type, std::string value) : Tok(tok), Type(type), Value(value) {}
+  ParamASTnode(TOKEN tok, TOKEN_TYPE type, std::string value) : Tok(tok), Type(type), Value(value) {}
   // virtual Value *codegen() override;
 };
 
@@ -444,13 +444,13 @@ public:
 };
 
 class ExternASTnode : public ASTnode {
-  std::string Type; // can be void
+  TOKEN_TYPE Type; // can be void
   std::string Identifier;
   std::unique_ptr<ParamsASTnode> Params;
   TOKEN Tok;
 
 public:
-  ExternASTnode(TOKEN tok, std::string type, std::string identifier, std::unique_ptr<ParamsASTnode> params) : Tok(tok), Type(type), Identifier(identifier), Params(std::move(params)) {}
+  ExternASTnode(TOKEN tok, TOKEN_TYPE type, std::string identifier, std::unique_ptr<ParamsASTnode> params) : Tok(tok), Type(type), Identifier(identifier), Params(std::move(params)) {}
   // virtual Value *codegen() override;
 };
 
@@ -660,14 +660,14 @@ public:
 
 // may contain void
 class FunDeclASTnode : public ASTnode {
-  std::string Return_Type; // may be void
+  TOKEN_TYPE Return_Type; // may be void
   std::string Name;
   std::unique_ptr<ParamsASTnode> Params;
   std::unique_ptr<BlockASTnode> Body; // Block
   TOKEN Tok;
 
 public:
-  FunDeclASTnode(TOKEN tok, std::string return_type, std::string name, std::unique_ptr<ParamsASTnode> params, std::unique_ptr<BlockASTnode> body) : Tok(tok), Return_Type(return_type), Name(name), Params(std::move(params)), Body(std::move(body)) {}
+  FunDeclASTnode(TOKEN tok, TOKEN_TYPE return_type, std::string name, std::unique_ptr<ParamsASTnode> params, std::unique_ptr<BlockASTnode> body) : Tok(tok), Return_Type(return_type), Name(name), Params(std::move(params)), Body(std::move(body)) {}
   // virtual Value *codegen() override;
 };
 
@@ -707,18 +707,18 @@ static bool TokenContains(std::vector<TOKEN_TYPE> allowed_tokens, int token)
 }
 
 // parses ("int" | "float" | "bool"), and if can_be_void, also (| "void")
-static std::string ParseType(bool can_be_void, std::string production_name) {
+static TOKEN_TYPE ParseType(bool can_be_void, std::string production_name) {
   std::vector<TOKEN_TYPE> legal_values_base = {INT_TOK, FLOAT_TOK, BOOL_TOK};
   if (!TokenContains(legal_values_base, CurTok.type) && (!can_be_void || CurTok.type != VOID_TOK)) {
     std::stringstream ss;
     ss << "Expected " << production_name << " to be one of 'int', 'float', 'bool'" << (can_be_void ? ", 'void'" : "") << ".";
     perror(ss.str().c_str());
-    return nullptr;
+    return INVALID;
   }
   // eat the type
-  auto type = CurTok.lexeme;
+  auto type = CurTok.type;
   getNextToken();
-  return type;
+  return static_cast<TOKEN_TYPE>(type);
 }
 
 // param ::= var_type IDENT
@@ -738,7 +738,9 @@ static std::unique_ptr<ParamASTnode> ParseParam() {
 }
 
 /* params ::= param_list  
-          |  "void" | epsilon */
+          |  "void" | epsilon 
+  param_list ::= param param_list2
+  param_list2 ::= "," param param_list | epsilon */
 static std::unique_ptr<ParamsASTnode> ParseParams() {
   std::vector<TOKEN_TYPE> param_list_first = {INT_TOK, FLOAT_TOK, BOOL_TOK};
   if (TokenContains(param_list_first, CurTok.type)) {
@@ -760,7 +762,7 @@ static std::unique_ptr<ParamsASTnode> ParseParams() {
     getNextToken();
     return std::make_unique<ParamsASTnode>(CurTok, true, std::move(std::vector<std::unique_ptr<ParamASTnode>>()));
   }
-  if (CurTok.type == RBRA) { // current token is in follow of params, thus do nothing but is still valid production
+  if (CurTok.type == RPAR) { // current token is in follow of params, thus do nothing but is still valid production
     return std::make_unique<ParamsASTnode>(CurTok, false, std::move(std::vector<std::unique_ptr<ParamASTnode>>()));
   }
   perror("Expected params to be either a list of param declarations, 'void', or empty, but is neither.");
@@ -819,6 +821,7 @@ static std::unique_ptr<FunDeclASTnode> ParseFunDecl() {
     perror("Expected ')' to follow params in a fun_decl.");
     return nullptr;
   }
+  getNextToken();
 
   auto body = ParseBlock();
 
@@ -888,7 +891,7 @@ static std::vector<std::unique_ptr<StmtASTnode>> ParseStmtList(); // forward dec
 static std::unique_ptr<BlockASTnode> ParseBlock() {
   // eat '{'
   if (CurTok.type != LBRA) {
-    perror("Expected block to begin with '{'.");
+    errs() << "Expected block to begin with '{'\n" << "Line # " << lineNo << "\nCur tok: " << CurTok.lexeme; 
     return nullptr;
   }
   getNextToken();
@@ -904,12 +907,12 @@ static std::unique_ptr<RValASTnode> ParseRVal(); // forward declaring ParseRVal 
 static std::unique_ptr<ExprASTnode> ParseExpr() {
   std::vector<TOKEN_TYPE> expr_first = {IDENT, MINUS, NOT, LPAR, INT_LIT, FLOAT_LIT, BOOL_LIT};
   if (!TokenContains(expr_first, CurTok.type)) {
-    perror("Expected expr to begin with one of identifier, unary -/!, (, or int/float/bool, but was none.");
+    errs() << "Expected expr to begin with one of identifier, unary -/!, (, or int/float/bool, but was none.\n" << "Line # " << lineNo << "\nCur tok: " << CurTok.lexeme;
     return nullptr;
   }
-  bool isRVal = true;
+  bool isRVal = false;
   if (CurTok.type != IDENT) {
-    isRVal = false;
+    isRVal = true;
   } 
   else {
     // since the first of both productions contains IDENT, must look at second look ahead symbol to determine production
@@ -917,10 +920,10 @@ static std::unique_ptr<ExprASTnode> ParseExpr() {
     auto first_token = CurTok;
     // obtain the second look ahead token
     auto second_token = getNextToken();
+    isRVal = second_token.type != ASSIGN;
     // put back second_token
     putBackToken(second_token);
     CurTok = first_token;
-    isRVal = second_token.type != ASSIGN;
   }
   if (isRVal) {
     auto rval = ParseRVal();
@@ -946,7 +949,7 @@ static std::unique_ptr<ExprStmtASTnode> ParseExprStmt() {
   }
   // eat the ';'
   if (CurTok.type != SC) {
-    perror("Expected ';' at the end of expr_stmt.");
+    errs() << "Expected ';' at the end of expr_stmt.\n" << "Line # " << lineNo << "\nCur tok: " << CurTok.lexeme; 
     return nullptr;
   }
   getNextToken();
@@ -1161,9 +1164,8 @@ static std::unique_ptr<ArgListASTnode> ParseArgs() {
 
 // element ::= "-" element | "!" element | "(" expr ")" | IDENT | IDENT "(" args ")" | INT_LIT | FLOAT_LIT | BOOL_LIT
 static std::unique_ptr<ElementASTnode> ParseElement() {
-  // std::vector<TOKEN_TYPE> follow_element = {};
-  if (CurTok.type == MINUS || CurTok.type == PLUS) {
-    // is PrefixOp with unary - or +
+  if (CurTok.type == MINUS || CurTok.type == NOT) {
+    // is PrefixOp with unary - or !
     auto op = static_cast<TOKEN_TYPE>(CurTok.type);
     // eat the unary operator
     getNextToken();
@@ -1194,6 +1196,12 @@ static std::unique_ptr<ElementASTnode> ParseElement() {
       // eat the '('
       getNextToken();
       auto args = ParseArgs();
+      // eat the ')'
+      if (CurTok.type != RPAR) {
+        perror("Expected ')' after args in a function call.");
+        return nullptr;
+      }
+      getNextToken();
       return std::make_unique<FunctionCallElementASTnode>(CurTok, ident_value, std::move(args));
     }
     else {
@@ -1427,13 +1435,13 @@ int main(int argc, char **argv) {
   columnNo = 1;
 
   // get the first token
-  getNextToken();
-  while (CurTok.type != EOF_TOK) {
-    fprintf(stderr, "Token: %s with type %d\n", CurTok.lexeme.c_str(),
-            CurTok.type);
-    getNextToken();
-  }
-  fprintf(stderr, "Lexer Finished\n");
+  auto first_token = getNextToken();
+  // while (CurTok.type != EOF_TOK) {
+  //   fprintf(stderr, "Token: %s with type %d\n", CurTok.lexeme.c_str(),
+  //           CurTok.type);
+  //   getNextToken();
+  // }
+  // fprintf(stderr, "Lexer Finished\n");
 
   // Make the module, which holds all the code.
   TheModule = std::make_unique<Module>("mini-c", TheContext);
