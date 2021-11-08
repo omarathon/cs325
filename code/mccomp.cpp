@@ -828,20 +828,20 @@ static std::unique_ptr<FunDeclASTnode> ParseFunDecl() {
 /* decl ::= var_decl 
         |  fun_decl */
 static std::unique_ptr<DeclASTnode> ParseDecl() {
-  auto firstToken = CurTok;
+  auto first_token = CurTok;
   // need to look ahead 3 tokens here 
-  auto secondToken = getNextToken();
-  auto thirdToken = getNextToken();
+  auto second_token = getNextToken();
+  auto third_token = getNextToken();
   // put tokens back in buffer
-  putBackToken(thirdToken);
-  putBackToken(secondToken);
-  CurTok = firstToken;
-  if (firstToken.type == VOID_TOK || thirdToken.type == LPAR) {
+  putBackToken(third_token);
+  putBackToken(second_token);
+  CurTok = first_token;
+  if (first_token.type == VOID_TOK || third_token.type == LPAR) {
     // is fun_decl
     auto fun_decl = ParseFunDecl();
     return std::make_unique<DeclASTnode>(CurTok, nullptr, std::move(fun_decl), false);
   }
-  else if (thirdToken.type == SC) {
+  else if (third_token.type == SC) {
     // is var_decl
     auto var_decl = ParseVarDecl();
     return std::make_unique<DeclASTnode>(CurTok, std::move(var_decl), nullptr, true);
@@ -897,15 +897,48 @@ static std::unique_ptr<BlockASTnode> ParseBlock() {
   return std::make_unique<BlockASTnode>(CurTok, std::move(local_decls), std::move(stmts));
 }
 
-// TODO
+static std::unique_ptr<RValASTnode> ParseRVal(); // forward declaring ParseRVal for ParseExpr
+
+/* expr ::= IDENT "=" expr
+        | rval */
 static std::unique_ptr<ExprASTnode> ParseExpr() {
-  return nullptr;
+  std::vector<TOKEN_TYPE> expr_first = {IDENT, MINUS, NOT, LPAR, INT_LIT, FLOAT_LIT, BOOL_LIT};
+  if (!TokenContains(expr_first, CurTok.type)) {
+    perror("Expected expr to begin with one of identifier, unary -/!, (, or int/float/bool, but was none.");
+    return nullptr;
+  }
+  bool isRVal = true;
+  if (CurTok.type != IDENT) {
+    isRVal = false;
+  } 
+  else {
+    // since the first of both productions contains IDENT, must look at second look ahead symbol to determine production
+    // since rval's second symbol can be '||' or its follow set, which does not contain '=', checking the second lookahead symbol as '=' uniquely determines whether it's the assignment or the rval production
+    auto first_token = CurTok;
+    // obtain the second look ahead token
+    auto second_token = getNextToken();
+    // put back second_token
+    putBackToken(second_token);
+    CurTok = first_token;
+    isRVal = second_token.type != ASSIGN;
+  }
+  if (isRVal) {
+    auto rval = ParseRVal();
+    return std::make_unique<RValExprASTnode>(CurTok, std::move(rval));
+  }
+  // is assignment
+  auto var_name_identifier = IdentifierStr;
+  getNextToken();
+  // we know this token is '=' because we already looked ahead. eat the '='.
+  getNextToken();
+  auto value_expr = ParseExpr();
+  return std::make_unique<AssignExprASTnode>(CurTok, var_name_identifier, std::move(value_expr));
 }
 
 /* expr_stmt ::= expr ";" 
              |  ";" */
 static std::unique_ptr<ExprStmtASTnode> ParseExprStmt() {
-  std::vector<TOKEN_TYPE> expr_first = {IDENT, MINUS, NOT, LPAR, IDENT, INT_TOK, FLOAT_TOK, BOOL_TOK};
+  std::vector<TOKEN_TYPE> expr_first = {IDENT, MINUS, NOT, LPAR, INT_LIT, FLOAT_LIT, BOOL_LIT};
   std::unique_ptr<ExprASTnode> expr = nullptr;
   if (TokenContains(expr_first, CurTok.type)) {
     // begins with an expr
@@ -1105,11 +1138,232 @@ static std::vector<std::unique_ptr<ExternASTnode>> ParseExternList() {
   return std::move(extern_list);
 }
 
+/* args ::= arg_list 
+        |  epsilon
+  arg_list ::= expr arg_list2
+  arg_list2 ::= "," expr arg_list2 | epsilon */
+static std::unique_ptr<ArgListASTnode> ParseArgs() {
+  std::vector<TOKEN_TYPE> expr_first = {IDENT, MINUS, NOT, LPAR, INT_LIT, FLOAT_LIT, BOOL_LIT};
+  std::vector<std::unique_ptr<ExprASTnode>> args_expr_list;
+  if (TokenContains(expr_first, CurTok.type)) {
+    auto expr = ParseExpr();
+    args_expr_list.push_back(std::move(expr));
+  }
+  // the rest are separated by ','
+  while (CurTok.type == COMMA) {
+    // eat the ','
+    getNextToken();
+    auto expr = ParseExpr();
+    args_expr_list.push_back(std::move(expr));
+  }
+  return std::make_unique<ArgListASTnode>(CurTok, std::move(args_expr_list));
+}
 
+// element ::= "-" element | "!" element | "(" expr ")" | IDENT | IDENT "(" args ")" | INT_LIT | FLOAT_LIT | BOOL_LIT
+static std::unique_ptr<ElementASTnode> ParseElement() {
+  // std::vector<TOKEN_TYPE> follow_element = {};
+  if (CurTok.type == MINUS || CurTok.type == PLUS) {
+    // is PrefixOp with unary - or +
+    auto op = static_cast<TOKEN_TYPE>(CurTok.type);
+    // eat the unary operator
+    getNextToken();
+    auto value_element = ParseElement();
+    return std::make_unique<PrefixOpElementASTnode>(CurTok, op, std::move(value_element));
+  }
+  else if (CurTok.type == LPAR) {
+    // is Parenthesis
+    // eat the '('
+    getNextToken();
+    auto inner_expr = ParseExpr();
+    // eat the ')'
+    if (CurTok.type != RPAR) {
+      perror("Expected ')' to follow the expr inside parenthesis element.");
+      return nullptr;
+    }
+    getNextToken();
+    return std::make_unique<ParanthesisElementASTnode>(CurTok, std::move(inner_expr));
+  }
+  else if (CurTok.type == IDENT) {
+    // is either an Identifier of a FunctionCall, lookahead another to determine
+    auto ident_value = IdentifierStr;
+    // eat the identifier
+    getNextToken();
+    // note that '(' is not in the follow set of element, thus checking '(' uniquely narrows down to a function call
+    if (CurTok.type == LPAR) {
+      // is a function call
+      // eat the '('
+      getNextToken();
+      auto args = ParseArgs();
+      return std::make_unique<FunctionCallElementASTnode>(CurTok, ident_value, std::move(args));
+    }
+    else {
+      // is just an identifier
+      return std::make_unique<IdentElementASTnode>(CurTok, ident_value);
+    }
+  }
+  else if (CurTok.type == INT_LIT) {
+    // is int literal
+    auto int_val = IntVal;
+    getNextToken();
+    return std::make_unique<IntElementASTnode>(CurTok, int_val);
+  }
+  else if (CurTok.type == FLOAT_LIT) {
+    // is float literal
+    auto float_val = FloatVal;
+    getNextToken();
+    return std::make_unique<FloatElementASTnode>(CurTok, float_val);
+  }
+  else if (CurTok.type == BOOL_LIT) {
+    // is bool literal
+    auto bool_val = BoolVal;
+    getNextToken();
+    return std::make_unique<BoolElementASTnode>(CurTok, bool_val);
+  }
+  printf("Expected element to be one of unary +/-, identifier, function call, int/float/bool literal, but was none.");
+  return nullptr;
+}
 
+/* factor ::= element factor2
+  factor2 ::= "*" element factor2 | "/" element factor2 | "%" element factor2 | epsilon */
+static std::unique_ptr<FactorASTnode> ParseFactor() {
+  std::vector<std::unique_ptr<ElementASTnode>> elements;
+  std::vector<TOKEN_TYPE> operators;
+  std::vector<TOKEN_TYPE> element_first = {MINUS, NOT, LPAR, IDENT, INT_LIT, FLOAT_LIT, BOOL_LIT};
+  // parse first element
+  if (!TokenContains(element_first, CurTok.type)) {
+    perror("Expected factor to begin with at least one element.");
+    return nullptr;
+  }
+  auto first_element = ParseElement();
+  elements.push_back(std::move(first_element));
+  // parse the rest of the elements separated by operators
+  std::vector<TOKEN_TYPE> factor2_first = {ASTERIX, DIV, MOD};
+  while (TokenContains(factor2_first, CurTok.type)) {
+    auto op = CurTok.type;
+    operators.push_back(static_cast<TOKEN_TYPE>(op));
+    getNextToken();
+    auto rhs_element = ParseElement();
+    elements.push_back(std::move(rhs_element));
+  }
+  return std::make_unique<FactorASTnode>(CurTok, std::move(elements), std::move(operators));
+}
 
+/* subexpr ::= factor subexpr2
+  subexpr2 ::= "+" factor subexpr2 | "-" factor subexpr2 | epsilon */
+static std::unique_ptr<SubexprASTnode> ParseSubexpr() {
+  std::vector<std::unique_ptr<FactorASTnode>> factors;
+  std::vector<TOKEN_TYPE> operators;
+  std::vector<TOKEN_TYPE> factor_first = {MINUS, NOT, LPAR, IDENT, INT_LIT, FLOAT_LIT, BOOL_LIT};
+  // parse first element
+  if (!TokenContains(factor_first, CurTok.type)) {
+    perror("Expected subexpr to begin with at least one factor.");
+    return nullptr;
+  }
+  auto first_factor = ParseFactor();
+  factors.push_back(std::move(first_factor));
+  // parse the rest of the factors separated by operators
+  std::vector<TOKEN_TYPE> subexpr2_first = {PLUS, MINUS};
+  while (TokenContains(subexpr2_first, CurTok.type)) {
+    auto op = CurTok.type;
+    operators.push_back(static_cast<TOKEN_TYPE>(op));
+    getNextToken();
+    auto rhs_factor = ParseFactor();
+    factors.push_back(std::move(rhs_factor));
+  }
+  return std::make_unique<SubexprASTnode>(CurTok, std::move(factors), std::move(operators));
+}
 
+/* rel ::= subexpr rel2
+  rel2 ::= "<=" subexpr rel2 | "<" subexpr rel2 | ">=" subexpr rel2 | ">" subexpr rel2 | epsilon */
+static std::unique_ptr<RelASTnode> ParseRel() {
+  std::vector<std::unique_ptr<SubexprASTnode>> subexprs;
+  std::vector<TOKEN_TYPE> operators;
+  std::vector<TOKEN_TYPE> subexpr_first = {MINUS, NOT, LPAR, IDENT, INT_LIT, FLOAT_LIT, BOOL_LIT};
+  // parse first element
+  if (!TokenContains(subexpr_first, CurTok.type)) {
+    perror("Expected rel to begin with at least one subexpr.");
+    return nullptr;
+  }
+  auto first_subexpr = ParseSubexpr();
+  subexprs.push_back(std::move(first_subexpr));
+  // parse the rest of the subexprs separated by operators
+  std::vector<TOKEN_TYPE> rel2_first = {GT, GE, LT, LE};
+  while (TokenContains(rel2_first, CurTok.type)) {
+    auto op = CurTok.type;
+    operators.push_back(static_cast<TOKEN_TYPE>(op));
+    getNextToken();
+    auto rhs_subexpr = ParseSubexpr();
+    subexprs.push_back(std::move(rhs_subexpr));
+  }
+  return std::make_unique<RelASTnode>(CurTok, std::move(subexprs), std::move(operators));
+}
 
+/* equiv ::= rel equiv2
+  equiv2 ::= "==" rel equiv2 | "!=" rel equiv2 | epsilon */
+static std::unique_ptr<EquivASTnode> ParseEquiv() {
+  std::vector<std::unique_ptr<RelASTnode>> rels;
+  std::vector<TOKEN_TYPE> operators;
+  std::vector<TOKEN_TYPE> rel_first = {MINUS, NOT, LPAR, IDENT, INT_LIT, FLOAT_LIT, BOOL_LIT};
+  // parse first element
+  if (!TokenContains(rel_first, CurTok.type)) {
+    perror("Expected equiv to begin with at least one rel.");
+    return nullptr;
+  }
+  auto first_rel = ParseRel();
+  rels.push_back(std::move(first_rel));
+  // parse the rest of the rels separated by operators
+  std::vector<TOKEN_TYPE> equiv2_first = {EQ, NE};
+  while (TokenContains(equiv2_first, CurTok.type)) {
+    auto op = CurTok.type;
+    operators.push_back(static_cast<TOKEN_TYPE>(op));
+    getNextToken();
+    auto rhs_rel = ParseRel();
+    rels.push_back(std::move(rhs_rel));
+  }
+  return std::make_unique<EquivASTnode>(CurTok, std::move(rels), std::move(operators));
+}
+
+/* term ::= equiv term2
+  term2 ::= "&&" equiv term2 | epsilon */
+static std::unique_ptr<TermASTnode> ParseTerm() {
+  std::vector<std::unique_ptr<EquivASTnode>> equivs;
+  std::vector<TOKEN_TYPE> equiv_first = {MINUS, NOT, LPAR, IDENT, INT_LIT, FLOAT_LIT, BOOL_LIT};
+  // parse first element
+  if (!TokenContains(equiv_first, CurTok.type)) {
+    perror("Expected term to begin with at least one equiv.");
+    return nullptr;
+  }
+  auto first_equiv = ParseEquiv();
+  equivs.push_back(std::move(first_equiv));
+  // parse the rest of the equivs separated by operators
+  while (CurTok.type == AND) {
+    getNextToken();
+    auto rhs_equiv = ParseEquiv();
+    equivs.push_back(std::move(rhs_equiv));
+  }
+  return std::make_unique<TermASTnode>(CurTok, std::move(equivs));
+}
+
+/* rval ::= term rval2
+  rval2 ::= "||" term rval2 | epsilon */
+static std::unique_ptr<RValASTnode> ParseRVal() {
+  std::vector<std::unique_ptr<TermASTnode>> terms;
+  std::vector<TOKEN_TYPE> term_first = {MINUS, NOT, LPAR, IDENT, INT_LIT, FLOAT_LIT, BOOL_LIT};
+  // parse first element
+  if (!TokenContains(term_first, CurTok.type)) {
+    perror("Expected rval to begin with at least one term.");
+    return nullptr;
+  }
+  auto first_term = ParseTerm();
+  terms.push_back(std::move(first_term));
+  // parse the rest of the equivs separated by operators
+  while (CurTok.type == OR) {
+    getNextToken();
+    auto rhs_term = ParseTerm();
+    terms.push_back(std::move(rhs_term));
+  }
+  return std::make_unique<RValASTnode>(CurTok, std::move(terms));
+}
 
 // program ::= extern_list decl_list | decl_list
 static std::unique_ptr<ASTnode> ParseProgram() {
