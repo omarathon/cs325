@@ -18,9 +18,8 @@
   param_list2 ::= "," param param_list | epsilon
   param ::= var_type IDENT
   block ::= "{" local_decls stmt_list "}"
-  local_decls ::= local_decl local_decls
+  local_decls ::= var_decl local_decls
                |  epsilon
-  local_decl ::= var_type IDENT ";"
   stmt_list ::= stmt stmt_list
              |  epsilon
   stmt ::= expr_stmt 
@@ -34,8 +33,7 @@
   if_stmt ::= "if" "(" expr ")" block else_stmt
   else_stmt  ::= "else" block
               |  epsilon
-  return_stmt ::= "return" ";" 
-               |  "return" expr ";"               
+  return_stmt ::= "return" expr_stmt           
   # operators in order of increasing precedence    CANCER   
   expr ::= IDENT "=" expr
         | rval
