@@ -1,0 +1,162 @@
+  program
+    externs
+      extern
+        d
+        id=print_int
+        param
+          param
+            d
+            value=X
+    declarations
+      declaration
+        function declaration
+          n
+          name=fibonacci
+          param
+            param
+              d
+              value=n
+          body
+            block
+              local decls
+                variable declaration
+                  d
+                  value=first
+                variable declaration
+                  d
+                  value=second
+                variable declaration
+                  d
+                  value=next
+                variable declaration
+                  d
+                  value=c
+                variable declaration
+                  d
+                  value=total
+              statements
+                expr statement
+                  rval delegation expr
+                    rval expr (||)
+                      term expr (&&)
+                        equiv expr (==, !=)
+                          rel expr (<=, <, >=, >)
+                            subexpr expr (+, -)
+                              factor expr (*, /, %)
+                                function call expr
+                                  functionName=print_int
+                                  args
+                                    rval delegation expr
+                                      rval expr (||)
+                                        term expr (&&)
+                                          equiv expr (==, !=)
+                                            rel expr (<=, <, >=, >)
+                                              subexpr expr (+, -)
+                                                factor expr (*, /, %)
+                                                  identifier expr
+                                                    value=n
+                expr statement
+                  assign expr (=)
+                    varName=first
+                    value
+                      rval delegation expr
+                        rval expr (||)
+                          term expr (&&)
+                            equiv expr (==, !=)
+                              rel expr (<=, <, >=, >)
+                                subexpr expr (+, -)
+                                  factor expr (*, /, %)
+                                    int expr
+                                      value=
+                expr statement
+                  assign expr (=)
+                    varName=second
+                    value
+                      rval delegation expr
+                        rval expr (||)
+                          term expr (&&)
+                            equiv expr (==, !=)
+                              rel expr (<=, <, >=, >)
+                                subexpr expr (+, -)
+                                  factor expr (*, /, %)
+                                    int expr
+                                      alue=
+                expr statement
+                  assign expr (=)
+                    varName=c
+                    value
+                      rval delegation expr
+                        rval expr (||)
+                          term expr (&&)
+                            equiv expr (==, !=)
+                              rel expr (<=, <, >=, >)
+                                subexpr expr (+, -)
+                                  factor expr (*, /, %)
+                                    int expr
+                                      alue=
+                expr statement
+                  assign expr (=)
+                    varName=total
+                    value
+                      rval delegation expr
+                        rval expr (||)
+                          term expr (&&)
+                            equiv expr (==, !=)
+                              rel expr (<=, <, >=, >)
+                                subexpr expr (+, -)
+                                  factor expr (*, /, %)
+                                    int expr
+                                      value=
+                while statement
+                  condition
+                    rval delegation expr
+                      rval expr (||)
+                        term expr (&&)
+                          equiv expr (==, !=)
+                            rel expr (<=, <, >=, >)
+                              subexpr expr (+, -)
+                                factor expr (*, /, %)
+                                  identifier expr
+                                    value=c
+                              ==, !=)
+                              subexpr expr (+, -)
+                                factor expr (*, /, %)
+                                  identifier expr
+                                    value=n
+                  body
+                    block
+                      local decls
+                      statements
+                        if statement
+                          condition
+                            rval delegation expr
+                              rval expr (||)
+                                term expr (&&)
+                                  equiv expr (==, !=)
+                                    rel expr (<=, <, >=, >)
+                                      subexpr expr (+, -)
+                                        factor expr (*, /, %)
+                                          identifier expr
+                                            value=c
+                                      actor expr (*, /, %)
+                                      subexpr expr (+, -)
+                                        factor expr (*, /, %)
+                                          int expr
+                                            alue=
+                          if body:
+                            block
+                              local decls
+                              statements
+                                expr statement
+                                  assign expr (=)
+                                    varName=next
+                                    value
+                                      rval delegation expr
+                                        rval expr (||)
+                                          term expr (&&)
+                                            equiv expr (==, !=)
+                                              rel expr (<=, <, >=, >)
+                                                subexpr expr (+, -)
+                                                  factor expr (*, /, %)
+                                                    identifier expr
+                                                      value=c
