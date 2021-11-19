@@ -426,6 +426,59 @@ static llvm::Type *GetTokenLLVMType(TOKEN token) {
   return nullptr;
 }
 
+static Constant *GetTypeInitVal(Type *ty) {
+  // convert to float
+  if (ty->isIntegerTy(1)) {
+    return ConstantInt::get(TheContext, APInt(1, 0));
+  }
+  if (ty->isIntegerTy(32)) {
+    return ConstantInt::get(TheContext, APInt(32, 0));
+  }
+  return ConstantFP::get(TheContext, APFloat(0.0f));
+}
+
+Value *CastToBool(Value *v) {
+  if (v->getType()->isIntegerTy(32)) {
+    return Builder.CreateZExt(v, Builder.getInt1Ty());
+  }
+  if (v->getType()->isFloatTy()) {
+    return Builder.CreateFPToUI(v, Builder.getInt1Ty());
+  }
+  return v; // is a bool
+}
+
+Value *CastToInt(Value *v) {
+  if (v->getType()->isIntegerTy(1)) {
+    return Builder.CreateZExt(v, Builder.getInt32Ty());
+  }
+  if (v->getType()->isFloatTy()) {
+    return Builder.CreateFPToSI(v, Builder.getInt32Ty());
+  }
+  return v; // is an int
+}
+
+Value *CastToFloat(Value *v) {
+  if (v->getType()->isIntegerTy(1)) {
+    return Builder.CreateUIToFP(v, Builder.getFloatTy());
+  }
+  if (v->getType()->isIntegerTy(32)) {
+    return Builder.CreateSIToFP(v, Builder.getFloatTy());
+  }
+  return v; // is a float
+}
+
+Type *MaxType(Type *t1, Type *t2) {
+  if (t1->isFloatTy() || t2->isFloatTy()) return Builder.getFloatTy();
+  if (t1->isIntegerTy(32) || t2->isIntegerTy(32)) return Builder.getInt32Ty();
+  return Builder.getInt1Ty();
+}
+
+Value *Cast(Value *v, Type *t) {
+  if (t->isFloatTy()) return CastToFloat(v);
+  if (t->isIntegerTy(32)) return CastToInt(v);
+  return CastToBool(v);
+}
+
 //===----------------------------------------------------------------------===//
 // AST nodes
 //===----------------------------------------------------------------------===//
@@ -470,7 +523,7 @@ class IntASTnode : public ASTnode {
 public:
   IntASTnode(TOKEN tok, int val) : Val(val), Tok(tok) {}
   Value *codegen() override {
-    return ConstantInt::get(TheContext, APInt(32, Val));
+    return Builder.CreateSIToFP(ConstantInt::get(TheContext, APInt(32, Val)), Type::getFloatTy(TheContext));
   }
   std::unique_ptr<StringCollection> to_string() const override {
     std::stringstream ss;
@@ -500,9 +553,18 @@ public:
       if (GlobalNamedValues[Val]) {
         errs() << "Global variable " << Val << " redeclared.";
         return nullptr;
-      } 
+      }
+      // GlobalVariable* gvar = new llvm::GlobalVariable(*TheModule, 
+      //   /*Type=*/ty,
+      //   /*isConstant=*/false,
+      //   /*Linkage=*/GlobalValue::ExternalLinkage,
+      //   /*Initializer=*/nullptr, // has initializer, specified below
+      //   /*Name=*/Val);
+
       TheModule->getOrInsertGlobal(Val, ty);
       GlobalVariable *gVar = TheModule->getNamedGlobal(Val);
+      gVar->setInitializer(GetTypeInitVal(ty));
+      // gVar->setLinkage(GlobalValue::ExternalLinkage);
       GlobalNamedValues[Val] = gVar;
       return gVar;
     }
@@ -662,10 +724,21 @@ public:
     Value *inner_val = Value_Element->codegen();
     if (!inner_val) return nullptr; // propogate
     if (Op.type == NOT) { // is !
-      return Builder.CreateNeg(inner_val, "negtmp");
+      inner_val = CastToBool(inner_val);
+      return Builder.CreateNot(inner_val);
+      // return Builder.CreateFCmpONE(inner_val, ConstantFP::get(TheContext, APFloat(1.0f)), "negtmp");
+      // return Builder.CreateSIToFP(Builder.CreateNeg(CastFromFloatToType(inner_val, Type::getInt1Ty(TheContext)), "negtmp"), Type::getFloatTy(TheContext)); // convert to float
     }
     else { // is -
-      return Builder.CreateNeg(inner_val, "fnegtmp");
+      // if a bool, convert to int and negate.
+      // if an int or a float, negate
+      if (inner_val->getType()->isIntegerTy(1)) {
+        inner_val = CastToInt(inner_val);
+      }
+      if (inner_val->getType()->isIntegerTy(32)) {
+        return Builder.CreateNeg(inner_val, "negtmp"); 
+      }
+      return Builder.CreateFNeg(inner_val, "fnegtmp");
     }
   }
   std::unique_ptr<StringCollection> to_string() const override {
@@ -699,12 +772,10 @@ public:
   Value *codegen() override {
     // an IDENT in an expr / element is a variable name
     // Look this variable up in the function, preferring local over global variables
-    Value *V = NamedValues[Val] ? NamedValues[Val] : GlobalNamedValues[Val];
-    if (!V) {
-      errs() << "Unknown variable name " << Val;
-      return nullptr;
-    }
-    return V;
+    if (NamedValues[Val]) return Builder.CreateLoad(NamedValues[Val], Val);
+    if (GlobalNamedValues[Val]) return Builder.CreateLoad(GlobalNamedValues[Val]);
+    errs() << "Unknown variable name " << Val;
+    return nullptr;
   }
   std::unique_ptr<StringCollection> to_string() const override {
     auto str_base = std::make_unique<StringCollection>("identifier expr");
@@ -749,7 +820,8 @@ class BoolElementASTnode : public ElementASTnode {
 public:
   BoolElementASTnode(TOKEN tok, bool value) : Tok(tok), Val(value) {}
   Value *codegen() override {
-    return Val ? Builder.getTrue() : Builder.getFalse(); // returns ConstantInt::getTrue or ConstantInt::getFalse which are 1-bit integers
+    return Val ? Builder.getTrue() : Builder.getFalse();
+    // return ConstantInt::get(TheContext, APInt(1, Val ? 1 : 0));
   }
   std::unique_ptr<StringCollection> to_string() const override {
     auto str_base = std::make_unique<StringCollection>("bool expr");
@@ -781,7 +853,13 @@ public:
 
     std::vector<Value *> ArgsV;
     for (unsigned i = 0, e = Args->Args_Expr_List.size(); i != e; ++i) {
-      ArgsV.push_back(Args->Args_Expr_List[i]->codegen());
+      Value *arg_val = Args->Args_Expr_List[i]->codegen();
+      Type *arg_expected_type = CalleeF->getArg(i)->getType();
+      if (arg_val->getType() != arg_expected_type) {
+        errs() << "Argument of incorrece type.";
+        return nullptr;
+      }
+      ArgsV.push_back(arg_val);
       if (!ArgsV.back())
         return nullptr;
     }
@@ -805,26 +883,38 @@ public:
   FactorASTnode(TOKEN tok, std::vector<std::unique_ptr<ElementASTnode>> elements, std::vector<TOKEN> operators) : Tok(tok), Elements(std::move(elements)), Operators(std::move(operators)) {}
   Value *codegen() override {
     Value *l = Elements[0]->codegen();
-    if (!l) {
-      errs() << "Invalid element.";
-      return nullptr;
+    if (!l) return nullptr;
+    auto n = Elements.size();
+    if (n == 1) return l;
+    // promote bool to an int if we have one
+    if (l->getType()->isIntegerTy(1)) {
+      l = CastToInt(l);
     }
-    for (unsigned i = 1; i < Elements.size(); i++) {
+    for (unsigned i = 1; i < n; i++) {
       TOKEN op_tok = Operators[i - 1];
       Value *r = Elements[i]->codegen();
-      if (!r) {
-        errs() << "Invalid element.";
+      if (!r) return nullptr;
+      if (op_tok.type == MOD && !(l->getType()->isIntegerTy(32) && r->getType()->isIntegerTy(32))) { // if the operator is % and we have both integer arguments, this is an error 
+        errs() << "Mod with non-integer operands.";
         return nullptr;
       }
+      // promote to max type
+      Type *max_type = MaxType(l->getType(), r->getType());
+      if (l->getType() != max_type) l = Cast(l, max_type);
+      else if (r->getType() != max_type) r = Cast(r, max_type);
+      // l and r have the same type
+      bool int_op = max_type->isIntegerTy();
       switch (op_tok.type) {
         case ASTERIX:
-          l = Builder.CreateFMul(l, r, "multmp");
+          l = int_op ? Builder.CreateMul(l, r, "multmp") : Builder.CreateFMul(l, r, "multmp");
           break;
         case DIV:
-          l = Builder.CreateFDiv(l, r, "divtmp");
+          l = int_op ? Builder.CreateSDiv(l, r, "divtmp") : Builder.CreateFDiv(l, r, "divtmp");
           break;
         case MOD:
-          l = Builder.CreateFRem(l, r, "modtmp");
+          // guaranteed to be both ints
+          l = Builder.CreateSRem(l, r, "modtmp");
+          break;
         default: // just to satify c++ compiler
           return nullptr;
       }
@@ -852,23 +942,30 @@ public:
   SubexprASTnode(TOKEN tok, std::vector<std::unique_ptr<FactorASTnode>> factors, std::vector<TOKEN> operators) : Tok(tok), Factors(std::move(factors)), Operators(std::move(operators)) {}
   Value *codegen() override {
     Value *l = Factors[0]->codegen();
-    if (!l) {
-      errs() << "Invalid factor.";
-      return nullptr;
+    if (!l) return nullptr;
+    auto n = Factors.size();
+    if (n == 1) return l;
+    // promote bool to int if we have one
+    if (l->getType()->isIntegerTy(1)) {
+      l = CastToInt(l);
     }
     for (unsigned i = 1; i < Factors.size(); i++) {
       TOKEN op_tok = Operators[i - 1];
       Value *r = Factors[i]->codegen();
-      if (!r) {
-        errs() << "Invalid factor.";
-        return nullptr;
-      }
+      if (!r) return nullptr;
+      // promote the least type
+      Type *max_type = MaxType(l->getType(), r->getType());
+      if (l->getType() != max_type) l = Cast(l, max_type);
+      else if (r->getType() != max_type) r = Cast(r, max_type);
+      // l and r are the same type
+      bool int_op = max_type->isIntegerTy();
       switch (op_tok.type) {
         case PLUS:
-          l = Builder.CreateFAdd(l, r, "addtmp");
+          l = int_op ? Builder.CreateAdd(l, r, "addtmp") : Builder.CreateFAdd(l, r, "addtmp");
           break;
         case MINUS:
-          l = Builder.CreateFSub(l, r, "subtmp");
+          l = int_op ? Builder.CreateSub(l, r, "subtmp") : Builder.CreateFSub(l, r, "subtmp");
+          break;
         default: // just to satify c++ compiler
           return nullptr;
       }
@@ -896,36 +993,40 @@ public:
   RelASTnode(TOKEN tok, std::vector<std::unique_ptr<SubexprASTnode>> subexprs, std::vector<TOKEN> operators) : Tok(tok), Subexprs(std::move(subexprs)), Operators(std::move(operators)) {}
   Value *codegen() override {
     Value *l = Subexprs[0]->codegen();
-    if (!l) {
-      errs() << "Invalid subexpr.";
-      return nullptr;
-    }
-    for (unsigned i = 1; i < Subexprs.size(); i++) {
+    if (!l) return nullptr;
+    auto n = Subexprs.size();
+    if (n == 1) return l;
+    for (unsigned i = 1; i < n; i++) {
       TOKEN op_tok = Operators[i - 1];
       Value *r = Subexprs[i]->codegen();
-      if (!r) {
-        errs() << "Invalid subexpr.";
-        return nullptr;
-      }
+      if (!r) return nullptr;
+      // l and r must be the same type. bring the type higher if not
+      Type *max_type = MaxType(l->getType(), r->getType());
+      if (l->getType() != max_type) l = Cast(l, max_type);
+      else if (r->getType() != max_type) r = Cast(r, max_type);
+      // l and r are now the same type
+      bool int_op = r->getType()->isIntegerTy();
       switch (op_tok.type) {
         // CreateFCmpULE, CreateFCmpULT, CreateFCmpUGE, CreateFCmpUGT
         case LE:
-          l = Builder.CreateFCmpULE(l, r, "letmp");
+          l = int_op ? Builder.CreateICmpULE(l, r, "letmp") : Builder.CreateFCmpULE(l, r, "letmp");
           break;
         case GE:
-          l = Builder.CreateFCmpUGE(l, r, "getmp");
+          l = int_op ? Builder.CreateICmpUGE(l, r, "getmp") : Builder.CreateFCmpUGE(l, r, "getmp");
           break;
         case LT:
-          l = Builder.CreateFCmpULT(l, r, "lttmp");
+          l = int_op ? Builder.CreateICmpULT(l, r, "lttmp") : Builder.CreateFCmpULT(l, r, "lttmp");
           break;
         case GT:
-          l = Builder.CreateFCmpUGT(l, r, "gttmp");
+          l = int_op ? Builder.CreateICmpUGT(l, r, "gttmp") : Builder.CreateFCmpUGT(l, r, "gttmp");
           break;
         default: // just to satify c++ compiler
           return nullptr;
       }
     }
-    return l;
+    // result is always a bool
+    return CastToBool(l);
+    // return Builder.CreateUIToFP(l, Type::getFloatTy(TheContext));
   }
   std::unique_ptr<StringCollection> to_string() const override {
     auto str_base = std::make_unique<StringCollection>("rel expr (<=, <, >=, >)");
@@ -948,30 +1049,33 @@ public:
   EquivASTnode(TOKEN tok, std::vector<std::unique_ptr<RelASTnode>> rels, std::vector<TOKEN> operators) : Tok(tok), Rels(std::move(rels)), Operators(std::move(operators)) {}
   Value *codegen() override {
     Value *l = Rels[0]->codegen();
-    if (!l) {
-      errs() << "Invalid rel.";
-      return nullptr;
-    }
-    for (unsigned i = 1; i < Rels.size(); i++) {
+    if (!l) return nullptr;
+    auto n = Rels.size();
+    if (n == 1) return l;
+    for (unsigned i = 1; i < n; i++) {
       TOKEN op_tok = Operators[i - 1];
       Value *r = Rels[i]->codegen();
-      if (!r) {
-        errs() << "Invalid rel.";
-        return nullptr;
-      }
+      if (!r) return nullptr;
+      // promote to max type https://stackoverflow.com/a/24067599
+      Type *max_type = MaxType(l->getType(), r->getType());
+      if (l->getType() != max_type) l = Cast(l, max_type);
+      else if (r->getType() != max_type) r = Cast(r, max_type);
+      // l and r and the same type
+      bool int_op = max_type->isIntegerTy();
       switch (op_tok.type) {
         // CreateFCmpUEQ, CreateFCmpUNE
         case EQ:
-          l = Builder.CreateFCmpUEQ(l, r, "eqtmp");
+          l = int_op ? Builder.CreateICmpEQ(l, r, "eqtmp") : Builder.CreateFCmpUEQ(l, r, "eqtmp");
           break;
         case NE:
-          l = Builder.CreateFCmpUNE(l, r, "netmp");
+          l = int_op ? Builder.CreateICmpNE(l, r, "netmp") : Builder.CreateFCmpUNE(l, r, "netmp");
           break;
         default: // just to satify c++ compiler
           return nullptr;
       }
     }
-    return l;
+    std::cout << "\requiv expr codegen\n";
+    return Builder.CreateSIToFP(l, Type::getFloatTy(TheContext)); // convert to  float
   }
   std::unique_ptr<StringCollection> to_string() const override {
     auto str_base = std::make_unique<StringCollection>("equiv expr (==, !=)");
@@ -994,16 +1098,14 @@ public:
   TermASTnode(TOKEN tok, std::vector<std::unique_ptr<EquivASTnode>> equivs) : Tok(tok), Equivs(std::move(equivs)) {}
   Value *codegen() override {
     Value *l = Equivs[0]->codegen();
-    if (!l) {
-      errs() << "Invalid equiv.";
-      return nullptr;
-    }
-    for (unsigned i = 1; i < Equivs.size(); i++) {
+    if (!l) return nullptr;
+    auto n = Equivs.size();
+    if (n == 1) return l;
+    l = CastToBool(l);
+    for (unsigned i = 1; i < n; i++) {
       Value *r = Equivs[i]->codegen();
-      if (!r) {
-        errs() << "Invalid equiv.";
-        return nullptr;
-      }
+      if (!r) return nullptr;
+      r = CastToBool(r);
       l = Builder.CreateAnd(l, r, "andtmp");
     }
     return l;
@@ -1026,16 +1128,14 @@ public:
   RValASTnode(TOKEN tok, std::vector<std::unique_ptr<TermASTnode>> terms) : Tok(tok), Terms(std::move(terms)) {}
   Value *codegen() override {
     Value *l = Terms[0]->codegen();
-    if (!l) {
-      errs() << "Invalid term.";
-      return nullptr;
-    }
-    for (unsigned i = 1; i < Terms.size(); i++) {
+    if (!l) return nullptr;
+    auto n = Terms.size();
+    if (n == 1) return l;
+    l = CastToBool(l);
+    for (unsigned i = 1; i < n; i++) {
       Value *r = Terms[i]->codegen();
-      if (!r) {
-        errs() << "Invalid term.";
-        return nullptr;
-      }
+      if (!r) return nullptr;
+      r = CastToBool(r);
       l = Builder.CreateOr(l, r, "ortmp");
     }
     return l;
@@ -1060,21 +1160,27 @@ public:
   Value *codegen() override {
     // Codegen the RHS.
     Value *Val = Value_Expr->codegen();
-    if (!Val)
-      return nullptr; // pass through error
+    if (!Val) return nullptr; // pass through error
 
     // lookup variable declaration, prioritising local over global
-    Value *Variable = NamedValues[Var_Name_Identifier] ? NamedValues[Var_Name_Identifier] : GlobalNamedValues[Var_Name_Identifier];
-    if (!Variable) {
-      errs() << "Unknown variable name (assign) " << Var_Name_Identifier;
-      return nullptr;
-    } 
-
     if (NamedValues[Var_Name_Identifier]) {
+      // check type of RHS matches type of LHS
+      if (Val->getType() != NamedValues[Var_Name_Identifier]->getType()->getPointerElementType()) {
+        errs() << "RHS of assignment does not match type of LHS. " << Var_Name_Identifier ;
+        return nullptr;
+      }
       Builder.CreateStore(Val, NamedValues[Var_Name_Identifier]);
     }
+    else if (GlobalNamedValues[Var_Name_Identifier]) {
+      if (Val->getType() != GlobalNamedValues[Var_Name_Identifier]->getType()->getPointerElementType()) {
+        errs() << "RHS of assignment does not match type of LHS. " << Var_Name_Identifier;
+        return nullptr;
+      }
+      Builder.CreateStore(Val, GlobalNamedValues[Var_Name_Identifier]);
+    }
     else {
-      GlobalNamedValues[Var_Name_Identifier] = Val;
+      errs() << "Unknown variable name (assign) " << Var_Name_Identifier;
+      return nullptr;
     }
     
     return Val;
@@ -1138,12 +1244,23 @@ public:
   ReturnStmtASTnode(TOKEN tok, std::unique_ptr<ExprStmtASTnode> return_expr_stmt): Tok(tok), Return_Expr_Stmt(std::move(return_expr_stmt)) {}
   Value *codegen() override {
     // TODO: check type(return_val) = type(return type of cur function)
+    Function *TheFunction = Builder.GetInsertBlock()->getParent();
+    Type *return_type = TheFunction->getReturnType();
+
     if (Return_Expr_Stmt->Expr) { // have a return value
       // evaluate return value
       Value *return_val = Return_Expr_Stmt->Expr->codegen();
+      if (return_val->getType() != return_type) {
+        errs() << "Type of expression does not match the return type of the function.";
+        return nullptr;
+      }
       return Builder.CreateRet(return_val);
     }
     else { // no return value - return void
+      if (!return_type->isVoidTy()) {
+        errs() << "Missing return statement.";
+        return nullptr;
+      } 
       return Builder.CreateRetVoid();
     }
   }
@@ -1207,6 +1324,8 @@ public:
       }
     }
 
+    std::cout << "\nSTMT done codegennign stmts\n";
+
     // restore values for variables
     for (unsigned i = 0; i < numDecls; i++) {
       auto var_name = Local_Decls[i]->Val;
@@ -1218,6 +1337,8 @@ public:
         NamedValues.erase(var_name);
       }
     }
+
+    std::cout << "\nSTMT done restoring local vars\n";
 
     // for each local_decl, if the var name is already a local variable then this is a semantic error. note this is caught later on anyway in VarDeclASTNode::codegen - yay.
     // code gen each Local_Decl, storing beforehand the pre values for the vars and restoring them after this whole function
@@ -1255,16 +1376,17 @@ public:
       return nullptr;
 
     // Convert condition to a bool by comparing non-equal to 0.0.
-    CondV = Builder.CreateFCmpONE(
-        CondV, ConstantFP::get(TheContext, APFloat(0.0)), "ifcond");
+    CondV = CastToBool(CondV);
+    // Builder.CreateFCmpONE(
+    //     CastToFloat(CondV), ConstantFP::get(TheContext, APFloat(0.0f)), "ifcond");
 
     Function *TheFunction = Builder.GetInsertBlock()->getParent();
 
     // Create blocks for the then and else cases.  Insert the 'then' block at the
     // end of the function.
     BasicBlock *ThenBB = BasicBlock::Create(TheContext, "then", TheFunction);
-    BasicBlock *ElseBB = BasicBlock::Create(TheContext, "else", TheFunction);
-    BasicBlock *MergeBB = BasicBlock::Create(TheContext, "ifcont", TheFunction);
+    BasicBlock *ElseBB = BasicBlock::Create(TheContext, "else");
+    BasicBlock *MergeBB = BasicBlock::Create(TheContext, "ifcont");
 
     Builder.CreateCondBr(CondV, ThenBB, ElseBB);
 
@@ -1320,8 +1442,11 @@ public:
     Function *TheFunction = Builder.GetInsertBlock()->getParent();
 
     BasicBlock *LoopCondBB = BasicBlock::Create(TheContext, "loopcond", TheFunction);
-    BasicBlock *LoopBodyBB = BasicBlock::Create(TheContext, "loopbody", TheFunction);
-    BasicBlock *EndBB = BasicBlock::Create(TheContext, "loopend", TheFunction);
+    BasicBlock *LoopBodyBB = BasicBlock::Create(TheContext, "loopbody");
+    BasicBlock *EndBB = BasicBlock::Create(TheContext, "loopend");
+
+    // Create a branch from the current block to the loop condition
+    Builder.CreateBr(LoopCondBB);
 
     Builder.SetInsertPoint(LoopCondBB);
 
@@ -1331,13 +1456,15 @@ public:
       return nullptr;
 
     // Convert condition to a bool by comparing non-equal to 0.0.
-    CondV = Builder.CreateFCmpONE(
-        CondV, ConstantFP::get(TheContext, APFloat(0.0)), "loopcond");
+    CondV = CastToBool(CondV);
+    // CondV = Builder.CreateFCmpONE(
+    //     CondV, ConstantFP::get(TheContext, APFloat(0.0f)), "loopcond");
 
     // if the condition is true then branch to the loop body, otherwise branch to the end of the loop
     Builder.CreateCondBr(CondV, LoopBodyBB, EndBB);
 
     // Emit body
+    TheFunction->getBasicBlockList().push_back(LoopBodyBB);
     Builder.SetInsertPoint(LoopBodyBB);
 
     Value *BodyV = Body_Stmt->codegen();
@@ -1350,6 +1477,7 @@ public:
     // Emit end block.
     TheFunction->getBasicBlockList().push_back(EndBB);
     Builder.SetInsertPoint(EndBB);
+
     return CondV;
   }
   std::unique_ptr<StringCollection> to_string() const override {
@@ -1428,13 +1556,18 @@ public:
     }
 
     if (Value *RetVal = Body->codegen()) {
+      std::cout << "\nFUNCTION codegened body\n";
       // Finish off the function.
      // TODO: figure out of this is needed - Builder.CreateRet(RetVal);
       // Validate the generated code, checking for consistency.
       verifyFunction(*TheFunction);
 
+      std::cout << "\nFUNCTION codegened body and done verification\n";
+
       return TheFunction;
     }
+
+    std::cout << "\nFUNCTION failed to codegen body\n";
 
     // Error reading body, remove function.
     TheFunction->eraseFromParent();

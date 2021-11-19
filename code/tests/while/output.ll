@@ -1,9 +1,9 @@
 ; ModuleID = 'mini-c'
 source_filename = "mini-c"
 
-@test = common global i32 0, align 4
-@f = common global float 0.000000e+00, align 4
-@b = common global i1 false, align 4
+@test = global i32 0
+@f = global float 0.000000e+00
+@b = global i1 false
 
 declare i32 @print_int(i32)
 
@@ -12,28 +12,24 @@ entry:
   %result = alloca i32, align 4
   %n1 = alloca i32, align 4
   store i32 %n, i32* %n1, align 4
-  store i32 0, i32* %result, align 4
   store i32 12, i32* @test, align 4
   store i32 0, i32* %result, align 4
-  %test = load i32, i32* @test, align 4
-  %calltmp = call i32 @print_int(i32 %test)
-  br label %loophead
+  %0 = load i32, i32* @test, align 4
+  %calltmp = call i32 @print_int(i32 %0)
+  br label %loopcond
 
-loophead:                                         ; preds = %loop, %entry
+loopcond:                                         ; preds = %loopbody, %entry
   %result2 = load i32, i32* %result, align 4
-  %conv = sitofp i32 %result2 to float
-  %lttmp = fcmp ult float %conv, 1.000000e+01
-  %booltmp = uitofp i1 %lttmp to float
-  %whilecond = fcmp one float %booltmp, 0.000000e+00
-  br i1 %whilecond, label %loop, label %loopend
+  %lttmp = icmp ult i32 %result2, 10
+  br i1 %lttmp, label %loopbody, label %loopend
 
-loop:                                             ; preds = %loophead
+loopbody:                                         ; preds = %loopcond
   %result3 = load i32, i32* %result, align 4
   %addtmp = add i32 %result3, 1
   store i32 %addtmp, i32* %result, align 4
-  br label %loophead
+  br label %loopcond
 
-loopend:                                          ; preds = %loophead
+loopend:                                          ; preds = %loopcond
   %result4 = load i32, i32* %result, align 4
   ret i32 %result4
 }
