@@ -366,7 +366,7 @@ static TOKEN gettok() {
 }
 
 //===----------------------------------------------------------------------===//
-// Parser
+// Lexer Helper Functions
 //===----------------------------------------------------------------------===//
 
 /// CurTok/getNextToken - Provide a simple token buffer.  CurTok is the current
@@ -389,7 +389,7 @@ static TOKEN getNextToken() {
 static void putBackToken(TOKEN tok) { tok_buffer.push_front(tok); }
 
 //===----------------------------------------------------------------------===//
-// Code Generation
+// Code Generation Variables and Helper Functions
 //===----------------------------------------------------------------------===//
 
 static LLVMContext TheContext;
@@ -400,20 +400,17 @@ static std::map<std::string, AllocaInst*> NamedValues; // local var table(s)
 static std::map<std::string, Value *> GlobalNamedValues; //global var table
 static std::map<std::string, Function *> Functions;
 
-/// CreateEntryBlockAlloca - Create an alloca instruction in the entry block of
-/// the function.  This is used for mutable variables etc.
+/// Create an alloca instruction in the entry block of the function
 static AllocaInst *CreateEntryBlockAlloca(Function *TheFunction,
                                           const std::string &VarName,
-                                          llvm::Type *ty) {
-  IRBuilder<> TmpB(&TheFunction->getEntryBlock(),
-                 TheFunction->getEntryBlock().begin());
-  return TmpB.CreateAlloca(ty, 0,
-                           VarName.c_str());
+                                          Type *Type) {
+  IRBuilder<> tempBuilder(&TheFunction->getEntryBlock(), TheFunction->getEntryBlock().begin());
+  return tempBuilder.CreateAlloca(Type, 0, VarName.c_str());
 }
 
-static llvm::Type *GetTokenLLVMType(TOKEN token) {
-  llvm:Type *ty;
-  switch (token.type) {
+// Get the type of the given token and convert it to an llvm::Type
+static Type *GetTokenLLVMType(TOKEN tok) {
+  switch (tok.type) {
     case INT_TOK:
       return Builder.getInt32Ty();
     case BOOL_TOK:
@@ -426,85 +423,137 @@ static llvm::Type *GetTokenLLVMType(TOKEN token) {
   return nullptr;
 }
 
-static Constant *GetTypeInitVal(Type *ty) {
+// Get the default value for an llvm::Type, which is defined as false for booleans, 0 for ints and 0.0 for floats
+// Note this function should only be called with a boolean, int or float type - not void, since it doesn't have a value
+static Constant *GetTypeDefaultVal(Type *t) {
   // convert to float
-  if (ty->isIntegerTy(1)) {
+  if (t->isIntegerTy(1)) {
     return ConstantInt::get(TheContext, APInt(1, 0));
   }
-  if (ty->isIntegerTy(32)) {
+  if (t->isIntegerTy(32)) {
     return ConstantInt::get(TheContext, APInt(32, 0));
   }
-  return ConstantFP::get(TheContext, APFloat(0.0f));
+  return ConstantFP::get(TheContext, APFloat(0.0f)); // Already a float
 }
 
+// Cast the input llvm::Value to an llvm::Value of type bool (unsigned 1-bit integer)
 Value *CastToBool(Value *v) {
   if (v->getType()->isIntegerTy(32)) {
-    return Builder.CreateZExt(v, Builder.getInt1Ty());
+    // Emit a comparison of the signed 32-bit int to a signed 32-bit 0 value, checking for non-equality, thus output is true (1) if the value is not equal to 0 and false (0) otherwise
+    return Builder.CreateICmpNE(v, ConstantInt::get(Builder.getInt32Ty(), 0, true));
   }
   if (v->getType()->isFloatTy()) {
+    // Emit floating point to unsigned int instruction
     return Builder.CreateFPToUI(v, Builder.getInt1Ty());
   }
-  return v; // is a bool
+  return v; // Already a bool
 }
 
+// Cast the input llvm::Value to an llvm::Value of type int (signed 32-bit integer)
 Value *CastToInt(Value *v) {
   if (v->getType()->isIntegerTy(1)) {
-    return Builder.CreateZExt(v, Builder.getInt32Ty());
+    // Emit cast to a signed 32-bit integer instruction
+    return Builder.CreateIntCast(v, Builder.getInt32Ty(), true);
   }
   if (v->getType()->isFloatTy()) {
+    // Emit floating point to signed int instruction
     return Builder.CreateFPToSI(v, Builder.getInt32Ty());
   }
-  return v; // is an int
+  return v; // Already an int
 }
 
+// Cast the input llvm::Value to an llvm::Value of type float (LLVM internal type)
 Value *CastToFloat(Value *v) {
   if (v->getType()->isIntegerTy(1)) {
+    // Emit unsigned integer to floating point instruction
     return Builder.CreateUIToFP(v, Builder.getFloatTy());
   }
   if (v->getType()->isIntegerTy(32)) {
+    // Emit signed integer to floating point instruction
     return Builder.CreateSIToFP(v, Builder.getFloatTy());
   }
-  return v; // is a float
+  return v; // Already a float
 }
 
+// Obtain the maximum of the two given llvm::Type's, where a float has the highest type, followed by int and finally bool with the lowest
+// Note this ordering is in the ordering of upcasting, i.e. one can always upcast bool -> int and int -> float but not necessarily the other way round
 Type *MaxType(Type *t1, Type *t2) {
   if (t1->isFloatTy() || t2->isFloatTy()) return Builder.getFloatTy();
   if (t1->isIntegerTy(32) || t2->isIntegerTy(32)) return Builder.getInt32Ty();
   return Builder.getInt1Ty();
 }
 
+// Cast the given llvm::Value to the given llvm::Type
 Value *Cast(Value *v, Type *t) {
   if (t->isFloatTy()) return CastToFloat(v);
   if (t->isIntegerTy(32)) return CastToInt(v);
   return CastToBool(v);
 }
 
+// Upcast the given llvm::Value to the given llvm::Type, and if no upcasting is possible
+// (i.e. only downcasting is possible, in the case the type to cast to has a lower rank than the type of the given value)
+// then return nullptr.
+Value *UpCast(Value *v, Type *target_type) {
+  Type *val_type = v->getType();
+  Type *max_type = MaxType(target_type, val_type);
+  if (val_type != target_type) {
+    if (val_type == max_type) {
+      // Type of value is maximal and since types are not equal it's greater than the type to cast to. Cannot upcast, error.
+      return nullptr;
+    }
+    // The type to cast to is maximal and thus greater than the type of value, thus we can upcast
+    return Cast(v, target_type);
+  }
+  // Value is already the type to cast to, nothing to do
+  return v;
+}
+
+// Print the given code generation error message to std::err and return a nullptr llvm::Value
+// to allow `return PrintCodeGenerationError(...)` to print the error message and return nullptr from the caller method.
+Value *PrintCodeGenerationError(std::string msg) {
+  errs() << "Code generation error: " << msg << "\n";
+  return nullptr;
+}
+
 //===----------------------------------------------------------------------===//
-// AST nodes
+// AST Printer Helper Class
 //===----------------------------------------------------------------------===//
 
+// A serialisable nested collection (tree) of strings, i.e. a string with a collection of child strings
 class StringCollection {
   std::string Str;
   std::vector<std::unique_ptr<StringCollection>> Children;
 public:
   StringCollection(std::string str) : Str(str) {}
-  void add_child(std::unique_ptr<StringCollection> child) {
+  // Add a collection of strings (node) to this string collection's children.
+  void AddChild(std::unique_ptr<StringCollection> child) {
     Children.push_back(std::move(child));
   }
-  std::string to_string(int indent, int indent_delta) {
+  // Recursively serialize this string collection (tree) by indenting the collection's string value by `ident` spaces
+  // and indenting all of its children string collections by `ident_delta` spaces
+  std::string ToString(int indent, int indent_delta) {
     std::stringstream ss;
+    // Add `ident` spaces
     for (int i = 0; i < indent; i++) {
       ss << " ";
     }
+    // Add the string value on this line
     ss << Str << "\n";
+    // The indent level for the children is the current indentation level + the delta
     int child_indent = indent + indent_delta;
+    // Write the serialization of each child to the stringstream
     for (auto&& child : Children) {
-      std::string child_str = child->to_string(child_indent, indent_delta);
+      std::string child_str = child->ToString(child_indent, indent_delta);
       ss << child_str;
     }
+    // Return the serialised StringCollection
     return ss.str();
   }
 };
+
+//===----------------------------------------------------------------------===//
+// AST and Code Generation
+//===----------------------------------------------------------------------===//
 
 /// ASTnode - Base class for all AST nodes.
 class ASTnode {
@@ -514,318 +563,271 @@ public:
   virtual std::unique_ptr<StringCollection> to_string() const;
 };
 
-/// IntASTnode - Class for integer literals like 1, 2, 10,
-class IntASTnode : public ASTnode {
-  int Val;
-  TOKEN Tok;
-  std::string Name;
-
-public:
-  IntASTnode(TOKEN tok, int val) : Val(val), Tok(tok) {}
-  Value *codegen() override {
-    return Builder.CreateSIToFP(ConstantInt::get(TheContext, APInt(32, Val)), Type::getFloatTy(TheContext));
-  }
-  std::unique_ptr<StringCollection> to_string() const override {
-    std::stringstream ss;
-    ss << "int literal: " << Val;
-    return std::make_unique<StringCollection>(ss.str());
-  };
-};
-
+// Variable declaration
 class VarDeclASTnode : public ASTnode {
-  TOKEN Type; // may not be void
-  TOKEN Tok;
-
+  TOKEN Type; // Not void type
 public:
-  std::string Val; // Identifier
-  VarDeclASTnode(TOKEN tok, TOKEN type, std::string value) : Tok(tok), Type(type), Val(value) {}
+  std::string Var_Name;
+  VarDeclASTnode(TOKEN type, std::string var_name) : Type(type), Var_Name(var_name) {}
   Value *codegen() override {
-    Function *TheFunction = Builder.GetInsertBlock() ? Builder.GetInsertBlock()->getParent() : nullptr;
-    // if TheFunction is null, it's a global variable, otherwise a local variable
-    bool isGlobal = !TheFunction;
+    // Get the current function being inserted into, which may be null in which case we're in global scope
+    Function *theFunction = Builder.GetInsertBlock() ? Builder.GetInsertBlock()->getParent() : nullptr;
+    // We're in global scope if we're not inserting into a function
+    bool isGlobal = !theFunction;
 
-    // type may be int, float, bool. int is a 32 bit integer, bool is a 1-bit integer, float is an llvm float.
-    llvm::Type *ty = GetTokenLLVMType(Type);
+    // Get llvm::Type of the variable declaration
+    llvm::Type *type = GetTokenLLVMType(Type);
 
     if (isGlobal) {
-      // check if it's already declared as a global variable. if so, we have an error
-      // note since we know we're in the global scope, we cannot be in a function thus there is no local declaration with the same name so we don't need to check that case
-      if (GlobalNamedValues[Val]) {
-        errs() << "Global variable " << Val << " redeclared.";
-        return nullptr;
-      }
-      // GlobalVariable* gvar = new llvm::GlobalVariable(*TheModule, 
-      //   /*Type=*/ty,
-      //   /*isConstant=*/false,
-      //   /*Linkage=*/GlobalValue::ExternalLinkage,
-      //   /*Initializer=*/nullptr, // has initializer, specified below
-      //   /*Name=*/Val);
+      // In global scope. Check if the variable is already declared globally, in which case error
+      if (GlobalNamedValues[Var_Name]) return PrintCodeGenerationError("Global variable with name " + Var_Name + " redeclared.");
 
-      TheModule->getOrInsertGlobal(Val, ty);
-      GlobalVariable *gVar = TheModule->getNamedGlobal(Val);
-      gVar->setInitializer(GetTypeInitVal(ty));
-      // gVar->setLinkage(GlobalValue::ExternalLinkage);
-      GlobalNamedValues[Val] = gVar;
+      // Emit and initialise the global variable to the default value for its type.
+      TheModule->getOrInsertGlobal(Var_Name, type);
+      GlobalVariable *gVar = TheModule->getNamedGlobal(Var_Name);
+      gVar->setInitializer(GetTypeDefaultVal(type)); 
+      GlobalNamedValues[Var_Name] = gVar;
       return gVar;
     }
-    else {
-      // declare the local variable
-      // we always allow the local variable to be declared here because we do the checking of duplicate declaration within the codegen for blocks, and local variable redeclaration can only occur in the same scope, which is a block
-      // note since local variables can override global variables, we don't error on that case
-      AllocaInst *alloca = CreateEntryBlockAlloca(TheFunction, Val, ty);
-      
-      // Remember this binding.
-      NamedValues[Val] = alloca;
-      return alloca;
-    }
+    // Is a local variable. Declare it.
+    // Note we always allow the local variable to be declard here because duplicate declaration of local variables is checked within BlockASTnode::codegen, and local varable redeclaration is only an issue within the same block.
+    // Note since local variables can override global variables, we don't error on that case.
+    AllocaInst *alloca = CreateEntryBlockAlloca(theFunction, Var_Name, type);
+    NamedValues[Var_Name] = alloca;
+    return alloca;
   }
   std::unique_ptr<StringCollection> to_string() const override {
-    auto str_base = std::make_unique<StringCollection>("variable declaration");
-    str_base->add_child(std::make_unique<StringCollection>("type=" + Type.lexeme));
-    str_base->add_child(std::make_unique<StringCollection>("value=" + Val));
+    auto str_base = std::make_unique<StringCollection>("variableDeclaration");
+    str_base->AddChild(std::make_unique<StringCollection>("type=" + Type.lexeme));
+    str_base->AddChild(std::make_unique<StringCollection>("variableName=" + Var_Name));
     return str_base;
-  };
+  }
 };
 
+// Parameter
 class ParamASTnode : public ASTnode {
-  TOKEN Tok;
-
 public:
-  TOKEN Type; // may not be void
-  std::string Val; // Identifier
-
-  ParamASTnode(TOKEN tok, TOKEN type, std::string value) : Tok(tok), Type(type), Val(value) {}
+  TOKEN Type; // Not void
+  std::string Param_Name;
+  ParamASTnode(TOKEN type, std::string param_name) : Type(type), Param_Name(param_name) {}
   Value *codegen() override {
-    return nullptr; // codegen is done for ParamsASTnode and not for a single ParamASTnode
+    // We delegate the code generation for all parameters of a function in FunDeclASTnode::codegen rather than on a per-parameter basis
+    return nullptr;
   }
   std::unique_ptr<StringCollection> to_string() const override {
     auto str_base = std::make_unique<StringCollection>("param");
-    str_base->add_child(std::make_unique<StringCollection>("type=" + Type.lexeme));
-    str_base->add_child(std::make_unique<StringCollection>("value=" + Val));
+    str_base->AddChild(std::make_unique<StringCollection>("type=" + Type.lexeme));
+    str_base->AddChild(std::make_unique<StringCollection>("name=" + Param_Name));
     return str_base;
-  };
+  }
 };
 
+// Parameters
 class ParamsASTnode : public ASTnode {
-  TOKEN Tok;
-
 public:
-  bool Is_Void;
+  bool Is_Void; // Are the parameters "void"?
   std::vector<std::unique_ptr<ParamASTnode>> Param_List;
-
-  ParamsASTnode(TOKEN tok, bool is_void, std::vector<std::unique_ptr<ParamASTnode>> param_list) : Tok(tok), Is_Void(is_void), Param_List(std::move(param_list)) {}
+  ParamsASTnode(bool is_void, std::vector<std::unique_ptr<ParamASTnode>> param_list) : Is_Void(is_void), Param_List(std::move(param_list)) {}
   Value *codegen() override {
-    return nullptr; // we implement the codegen for the params in the codegen for fun_decl and extern
+    // We delegate the code generation for the parameters of a function in FunDeclASTnode::codegen
+    return nullptr;
   }
   std::unique_ptr<StringCollection> to_string() const override {
     auto str_base = std::make_unique<StringCollection>("param");
     if (Is_Void) {
-      str_base->add_child(std::make_unique<StringCollection>("void"));
+      str_base->AddChild(std::make_unique<StringCollection>("void"));
       return str_base;
     }
     for (auto&& param : Param_List) {
-      str_base->add_child(param->to_string());
+      str_base->AddChild(param->to_string());
     }
     return str_base;
-  };
+  }
 };
 
+// Extern function
 class ExternASTnode : public ASTnode {
-  TOKEN Type; // can be void
-  std::string Identifier;
+  TOKEN Return_Type;
+  std::string Function_Name;
   std::unique_ptr<ParamsASTnode> Params;
-  TOKEN Tok;
 
 public:
-  ExternASTnode(TOKEN tok, TOKEN type, std::string identifier, std::unique_ptr<ParamsASTnode> params) : Tok(tok), Type(type), Identifier(identifier), Params(std::move(params)) {}
+  ExternASTnode(TOKEN return_type, std::string function_name, std::unique_ptr<ParamsASTnode> params) : Return_Type(return_type), Function_Name(function_name), Params(std::move(params)) {}
   Value *codegen() override {
-    // Make the function type:  double(double,double) etc.
-    std::vector<llvm::Type *> args_types;
+    // Make the function type
+    std::vector<llvm::Type *> argsTypes;
+    // Get the llvm::Type's of the parameters/arguments
     for (auto&& param : Params->Param_List) {
-      // get type of the param
-      llvm::Type *ty = GetTokenLLVMType(param->Type);
-      args_types.push_back(ty);
+      llvm::Type *type = GetTokenLLVMType(param->Type);
+      argsTypes.push_back(type);
     }
-    llvm::Type *return_type = GetTokenLLVMType(Type);
-    FunctionType *FT =
-        FunctionType::get(return_type, args_types, false);
+    // Get the llvm::Type of the return
+    llvm::Type *return_type = GetTokenLLVMType(Return_Type);
+    // Make the llvm::FunctionType
+    FunctionType *functionType = FunctionType::get(return_type, argsTypes, false);
+    // Make the llvm::Function specifing external linkage
+    Function *function = Function::Create(functionType, Function::ExternalLinkage, Function_Name, TheModule.get());
 
-    Function *F =
-        Function::Create(FT, Function::ExternalLinkage, Identifier, TheModule.get());
+    // Set names for all arguments
+    unsigned i = 0;
+    for (auto &arg : function->args())
+      arg.setName(Params->Param_List[i++]->Param_Name);
 
-    // Set names for all arguments.
-    unsigned Idx = 0;
-    for (auto &arg : F->args())
-      arg.setName(Params->Param_List[Idx++]->Val);
+    // Check the function isn't already declared
+    if (Functions[Function_Name]) return PrintCodeGenerationError("Redefinition of function " + Function_Name);
 
-
-    // now we have the function prototype F
-    Function *TheFunction = F;
-
-    // check the function isn't already declared
-    if (Functions[Identifier]) {
-      errs() << "Cannot redefine function " << Identifier;
-      return nullptr;
-    }
-
-    // store the function
-    Functions[Identifier] = F;
-
-    return F;
+    // Store the function
+    return Functions[Function_Name] = function;
   }
   std::unique_ptr<StringCollection> to_string() const override {
     auto str_base = std::make_unique<StringCollection>("extern");
-    str_base->add_child(std::make_unique<StringCollection>("type=" + Type.lexeme));
-    str_base->add_child(std::make_unique<StringCollection>("id=" + Identifier));
-    str_base -> add_child(Params->to_string());
+    str_base->AddChild(std::make_unique<StringCollection>("returnType=" + Return_Type.lexeme));
+    str_base->AddChild(std::make_unique<StringCollection>("functionName=" + Function_Name));
+    str_base -> AddChild(Params->to_string());
     return str_base;
-  };
+  }
 };
 
-// base class for priority 8 [least] subexpressions
+// Base class for priority 8 (least priority) expressions
 class ExprASTnode : public ASTnode {
-
 public:
  virtual ~ExprASTnode() {}
 };
 
+
+// List of arguments to a function call
 class ArgListASTnode : public ASTnode {
-  TOKEN Tok;
 public:
   std::vector<std::unique_ptr<ExprASTnode>> Args_Expr_List;
-  ArgListASTnode(TOKEN tok, std::vector<std::unique_ptr<ExprASTnode>> args_expr_list): Tok(tok), Args_Expr_List(std::move(args_expr_list)) {}
+  ArgListASTnode(std::vector<std::unique_ptr<ExprASTnode>> args_expr_list): Args_Expr_List(std::move(args_expr_list)) {}
   Value *codegen() override {
-    return nullptr; // implemented in function call codegen
+    // We delegate the code generation of argument lists to FunctionCallElementASTnode::codegen
+    return nullptr;
   }
   std::unique_ptr<StringCollection> to_string() const override {
     auto str_base = std::make_unique<StringCollection>("args");
     for (auto&& expr : Args_Expr_List) {
-      str_base->add_child(expr->to_string());
+      str_base->AddChild(expr->to_string());
     }
     return str_base;
-  };
+  }
 };
 
 
-// base class for element AST nodes (priority 1 [highest] subexpressions)
+// Base class for element AST nodes - priority 1 (highest priority) expressions
 class ElementASTnode : public ASTnode {
-
 public:
   virtual ~ElementASTnode() {}
 };
 
+// Prefix operator expressions - expressions with a unary ! or - as a prefix to an inner expression
 class PrefixOpElementASTnode : public ElementASTnode {
   TOKEN Op; // may be - or !
   std::unique_ptr<ElementASTnode> Value_Element;
-  TOKEN Tok;
 public:
-  PrefixOpElementASTnode(TOKEN tok, TOKEN op, std::unique_ptr<ElementASTnode> value_element): Tok(tok), Op(op), Value_Element(std::move(value_element)) {}
+  PrefixOpElementASTnode(TOKEN op, std::unique_ptr<ElementASTnode> value_element): Op(op), Value_Element(std::move(value_element)) {}
   Value *codegen() override {
-    Value *inner_val = Value_Element->codegen();
-    if (!inner_val) return nullptr; // propogate
-    if (Op.type == NOT) { // is !
-      inner_val = CastToBool(inner_val);
-      return Builder.CreateNot(inner_val);
-      // return Builder.CreateFCmpONE(inner_val, ConstantFP::get(TheContext, APFloat(1.0f)), "negtmp");
-      // return Builder.CreateSIToFP(Builder.CreateNeg(CastFromFloatToType(inner_val, Type::getInt1Ty(TheContext)), "negtmp"), Type::getFloatTy(TheContext)); // convert to float
+    // Emit value
+    Value *innerVal = Value_Element->codegen();
+    if (!innerVal) return nullptr; // Propogate error
+
+    if (Op.type == NOT) {
+      // Is unary ! operator. Only booleans can be input and output from this operator, so cast the inner llvm::Value to a boolean (which we can always do)
+      innerVal = CastToBool(innerVal);
+      // Emit ! instruction
+      return Builder.CreateNot(innerVal);
     }
-    else { // is -
-      // if a bool, convert to int and negate.
-      // if an int or a float, negate
-      if (inner_val->getType()->isIntegerTy(1)) {
-        inner_val = CastToInt(inner_val);
-      }
-      if (inner_val->getType()->isIntegerTy(32)) {
-        return Builder.CreateNeg(inner_val, "negtmp"); 
-      }
-      return Builder.CreateFNeg(inner_val, "fnegtmp");
+    // Is unary - operator. If the inner llvm::Value is a boolean then upcast it to an integer since -false = -1 thus we must enter the integer domain.
+    if (innerVal->getType()->isIntegerTy(1)) {
+      innerVal = CastToInt(innerVal);
     }
+    // The inner llvm::Value is either an integer or a float. Emit the ! operator respectively.
+    if (innerVal->getType()->isIntegerTy(32)) {
+      return Builder.CreateNeg(innerVal, "negtmp"); 
+    }
+    return Builder.CreateFNeg(innerVal, "fnegtmp");
   }
   std::unique_ptr<StringCollection> to_string() const override {
-    auto str_base = std::make_unique<StringCollection>("unary operator expr");
-    str_base->add_child(std::make_unique<StringCollection>("operator=" + Op.lexeme));
-    str_base->add_child(Value_Element->to_string());
+    auto str_base = std::make_unique<StringCollection>("unaryOpExpr");
+    str_base->AddChild(std::make_unique<StringCollection>("op=" + Op.lexeme));
+    str_base->AddChild(Value_Element->to_string());
     return str_base;
   };
 };
 
+// Parenthesis expression
 class ParanthesisElementASTnode : public ElementASTnode {
   std::unique_ptr<ExprASTnode> Inner_Expr;
-  TOKEN Tok;
 public:
-  ParanthesisElementASTnode(TOKEN tok, std::unique_ptr<ExprASTnode> inner_expr) : Tok(tok), Inner_Expr(std::move(inner_expr)) {}
+  ParanthesisElementASTnode(std::unique_ptr<ExprASTnode> inner_expr) : Inner_Expr(std::move(inner_expr)) {}
   Value *codegen() override {
-    return Inner_Expr->codegen(); // might have to use fence / arithmetic fence https://llvm.org/doxygen/classllvm_1_1IRBuilderBase.html#a32bca19222d089c85b256b96e6ad4dcd
+    // Paranthesis expressions simply exist to enforce precedence, but they emit just the code of the inner expression
+    return Inner_Expr->codegen();
   }
   std::unique_ptr<StringCollection> to_string() const override {
-    auto str_base = std::make_unique<StringCollection>("parenthesis expr");
-    str_base->add_child(Inner_Expr->to_string());
+    auto str_base = std::make_unique<StringCollection>("parenthesisExpr");
+    str_base->AddChild(Inner_Expr->to_string());
     return str_base;
   };
 };
 
+// IDENT expression, which is a variable
 class IdentElementASTnode : public ElementASTnode {
-  std::string Val;
-  TOKEN Tok;
+  std::string Var_Name;
 public:
-  IdentElementASTnode(TOKEN tok, std::string value) : Tok(tok), Val(value) {}
+  IdentElementASTnode(std::string var_name) : Var_Name(var_name) {}
   Value *codegen() override {
-    // an IDENT in an expr / element is a variable name
-    // Look this variable up in the function, preferring local over global variables
-    if (NamedValues[Val]) return Builder.CreateLoad(NamedValues[Val], Val);
-    if (GlobalNamedValues[Val]) return Builder.CreateLoad(GlobalNamedValues[Val]);
-    errs() << "Unknown variable name " << Val;
-    return nullptr;
+    // Lookup the variable, preferring local over global variables. Emit load of the alloca or global variable respectively if exist.
+    if (NamedValues[Var_Name]) return Builder.CreateLoad(NamedValues[Var_Name], Var_Name);
+    if (GlobalNamedValues[Var_Name]) return Builder.CreateLoad(GlobalNamedValues[Var_Name]);
+    return PrintCodeGenerationError("Undeclared variable name '" + Var_Name + "' in expression.");
   }
   std::unique_ptr<StringCollection> to_string() const override {
-    auto str_base = std::make_unique<StringCollection>("identifier expr");
-    str_base->add_child(std::make_unique<StringCollection>("value=" + Val));
+    auto str_base = std::make_unique<StringCollection>("identifierExpr");
+    str_base->AddChild(std::make_unique<StringCollection>("varName=" + Var_Name));
     return str_base;
-  };
+  }
 };
 
 class IntElementASTnode : public ElementASTnode {
   int Val;
-  TOKEN Tok;
 public:
-  IntElementASTnode(TOKEN tok, int value) : Tok(tok), Val(value) {}
+  IntElementASTnode(int value) : Val(value) {}
   Value *codegen() override {
     return ConstantInt::get(TheContext, APInt(32, Val));
   }
   std::unique_ptr<StringCollection> to_string() const override {
     auto str_base = std::make_unique<StringCollection>("int expr");
-    str_base->add_child(std::make_unique<StringCollection>("value=" + std::to_string(Val)));
+    str_base->AddChild(std::make_unique<StringCollection>("value=" + std::to_string(Val)));
     return str_base;
   };
 };
 
 class FloatElementASTnode: public ElementASTnode {
   float Val;
-  TOKEN Tok;
 public:
-  FloatElementASTnode(TOKEN tok, float value) : Tok(tok), Val(value) {}
+  FloatElementASTnode(float value) : Val(value) {}
   Value *codegen() override {
     return ConstantFP::get(TheContext, APFloat(Val));
   }
   std::unique_ptr<StringCollection> to_string() const override {
     auto str_base = std::make_unique<StringCollection>("float expr");
-    str_base->add_child(std::make_unique<StringCollection>("value=" + std::to_string(Val)));
+    str_base->AddChild(std::make_unique<StringCollection>("value=" + std::to_string(Val)));
     return str_base;
   };
 };
 
 class BoolElementASTnode : public ElementASTnode {
   bool Val;
-  TOKEN Tok;
 public:
-  BoolElementASTnode(TOKEN tok, bool value) : Tok(tok), Val(value) {}
+  BoolElementASTnode(bool value) : Val(value) {}
   Value *codegen() override {
     return Val ? Builder.getTrue() : Builder.getFalse();
     // return ConstantInt::get(TheContext, APInt(1, Val ? 1 : 0));
   }
   std::unique_ptr<StringCollection> to_string() const override {
     auto str_base = std::make_unique<StringCollection>("bool expr");
-    str_base->add_child(std::make_unique<StringCollection>("value=" + std::to_string(Val)));
+    str_base->AddChild(std::make_unique<StringCollection>("value=" + std::to_string(Val)));
     return str_base;
   };
 };
@@ -833,9 +835,8 @@ public:
 class FunctionCallElementASTnode : public ElementASTnode {
   std::string Function_Name_Identifier;
   std::unique_ptr<ArgListASTnode> Args;
-  TOKEN Tok;
 public:
-  FunctionCallElementASTnode(TOKEN tok, std::string function_name_identifier, std::unique_ptr<ArgListASTnode> args) : Tok(tok), Function_Name_Identifier(function_name_identifier), Args(std::move(args)) {}
+  FunctionCallElementASTnodestd::string function_name_identifier, std::unique_ptr<ArgListASTnode> args) : Function_Name_Identifier(function_name_identifier), Args(std::move(args)) {}
   Value *codegen() override {
     // std::vector<std::unique_ptr<ExprASTnode>> Args_Expr_List
     // Look up the name in the global module table.
@@ -855,21 +856,24 @@ public:
     for (unsigned i = 0, e = Args->Args_Expr_List.size(); i != e; ++i) {
       Value *arg_val = Args->Args_Expr_List[i]->codegen();
       Type *arg_expected_type = CalleeF->getArg(i)->getType();
-      if (arg_val->getType() != arg_expected_type) {
-        errs() << "Argument of incorrece type.";
-        return nullptr;
+      // attempt to upcast the argument value to its expected type
+      Value *upcast_arg_val = UpCast(arg_val, arg_expected_type);
+      if (!upcast_arg_val) {
+          errs() << "Argument of incorrece type.";
+          return nullptr;
       }
+      arg_val = upcast_arg_val;
       ArgsV.push_back(arg_val);
       if (!ArgsV.back())
         return nullptr;
     }
 
-    return Builder.CreateCall(CalleeF, ArgsV, "calltmp");
+    return Builder.CreateCall(CalleeF, ArgsV);
   }
   std::unique_ptr<StringCollection> to_string() const override {
     auto str_base = std::make_unique<StringCollection>("function call expr");
-    str_base->add_child(std::make_unique<StringCollection>("functionName=" + Function_Name_Identifier));
-    str_base->add_child(Args->to_string());
+    str_base->AddChild(std::make_unique<StringCollection>("functionName=" + Function_Name_Identifier));
+    str_base->AddChild(Args->to_string());
     return str_base;
   };
 };
@@ -878,9 +882,8 @@ public:
 class FactorASTnode : public ASTnode {
   std::vector<std::unique_ptr<ElementASTnode>> Elements; // from left to right. non-empty
   std::vector<TOKEN> Operators; // between each element in Elements. may be *, / or %. may be empty.
-  TOKEN Tok;
 public:
-  FactorASTnode(TOKEN tok, std::vector<std::unique_ptr<ElementASTnode>> elements, std::vector<TOKEN> operators) : Tok(tok), Elements(std::move(elements)), Operators(std::move(operators)) {}
+  FactorASTnode(std::vector<std::unique_ptr<ElementASTnode>> elements, std::vector<TOKEN> operators) : Elements(std::move(elements)), Operators(std::move(operators)) {}
   Value *codegen() override {
     Value *l = Elements[0]->codegen();
     if (!l) return nullptr;
@@ -923,11 +926,11 @@ public:
   }
   std::unique_ptr<StringCollection> to_string() const override {
     auto str_base = std::make_unique<StringCollection>("factor expr (*, /, %)");
-    str_base->add_child(Elements[0]->to_string());
+    str_base->AddChild(Elements[0]->to_string());
     // weave the operators between the elements
     for (int i = 1; i < Elements.size(); i++) {
-      str_base->add_child(std::make_unique<StringCollection>("op=" + Operators[i - 1].lexeme));
-      str_base->add_child(Elements[i]->to_string());
+      str_base->AddChild(std::make_unique<StringCollection>("op=" + Operators[i - 1].lexeme));
+      str_base->AddChild(Elements[i]->to_string());
     }
     return str_base;
   };
@@ -937,9 +940,8 @@ public:
 class SubexprASTnode : public ASTnode {
   std::vector<std::unique_ptr<FactorASTnode>> Factors; // from left to right. non-empty
   std::vector<TOKEN> Operators; // between each factor in Factors. may be + or -. may be empty.
-  TOKEN Tok;
 public:
-  SubexprASTnode(TOKEN tok, std::vector<std::unique_ptr<FactorASTnode>> factors, std::vector<TOKEN> operators) : Tok(tok), Factors(std::move(factors)), Operators(std::move(operators)) {}
+  SubexprASTnode(std::vector<std::unique_ptr<FactorASTnode>> factors, std::vector<TOKEN> operators) : Factors(std::move(factors)), Operators(std::move(operators)) {}
   Value *codegen() override {
     Value *l = Factors[0]->codegen();
     if (!l) return nullptr;
@@ -974,11 +976,11 @@ public:
   }
   std::unique_ptr<StringCollection> to_string() const override {
     auto str_base = std::make_unique<StringCollection>("subexpr expr (+, -)");
-    str_base->add_child(Factors[0]->to_string());
+    str_base->AddChild(Factors[0]->to_string());
     // weave the operators between the factors
     for (int i = 1; i < Factors.size(); i++) {
-      str_base->add_child(std::make_unique<StringCollection>("op=" + Operators[i - 1].lexeme));
-      str_base->add_child(Factors[i]->to_string());
+      str_base->AddChild(std::make_unique<StringCollection>("op=" + Operators[i - 1].lexeme));
+      str_base->AddChild(Factors[i]->to_string());
     }
     return str_base;
   };
@@ -988,9 +990,8 @@ public:
 class RelASTnode : public ASTnode {
   std::vector<std::unique_ptr<SubexprASTnode>> Subexprs; // from left to right. non-empty
   std::vector<TOKEN> Operators; // between each subexpr in Subexprs. may be <=, <, > or >=. may be empty.
-  TOKEN Tok;
 public:
-  RelASTnode(TOKEN tok, std::vector<std::unique_ptr<SubexprASTnode>> subexprs, std::vector<TOKEN> operators) : Tok(tok), Subexprs(std::move(subexprs)), Operators(std::move(operators)) {}
+  RelASTnode(std::vector<std::unique_ptr<SubexprASTnode>> subexprs, std::vector<TOKEN> operators) : Subexprs(std::move(subexprs)), Operators(std::move(operators)) {}
   Value *codegen() override {
     Value *l = Subexprs[0]->codegen();
     if (!l) return nullptr;
@@ -1030,11 +1031,11 @@ public:
   }
   std::unique_ptr<StringCollection> to_string() const override {
     auto str_base = std::make_unique<StringCollection>("rel expr (<=, <, >=, >)");
-    str_base->add_child(Subexprs[0]->to_string());
+    str_base->AddChild(Subexprs[0]->to_string());
     // weave the operators between the subexprs
     for (int i = 1; i < Subexprs.size(); i++) {
-      str_base->add_child(std::make_unique<StringCollection>("op=" + Operators[i - 1].lexeme));
-      str_base->add_child(Subexprs[i]->to_string());
+      str_base->AddChild(std::make_unique<StringCollection>("op=" + Operators[i - 1].lexeme));
+      str_base->AddChild(Subexprs[i]->to_string());
     }
     return str_base;
   };
@@ -1044,9 +1045,8 @@ public:
 class EquivASTnode : public ASTnode {
   std::vector<std::unique_ptr<RelASTnode>> Rels; // from left to right. non-empty
   std::vector<TOKEN> Operators; // between each rel in Rels. may be == or !=. may be empty.
-  TOKEN Tok;
 public:
-  EquivASTnode(TOKEN tok, std::vector<std::unique_ptr<RelASTnode>> rels, std::vector<TOKEN> operators) : Tok(tok), Rels(std::move(rels)), Operators(std::move(operators)) {}
+  EquivASTnode(std::vector<std::unique_ptr<RelASTnode>> rels, std::vector<TOKEN> operators) : Rels(std::move(rels)), Operators(std::move(operators)) {}
   Value *codegen() override {
     Value *l = Rels[0]->codegen();
     if (!l) return nullptr;
@@ -1079,11 +1079,11 @@ public:
   }
   std::unique_ptr<StringCollection> to_string() const override {
     auto str_base = std::make_unique<StringCollection>("equiv expr (==, !=)");
-    str_base->add_child(Rels[0]->to_string());
+    str_base->AddChild(Rels[0]->to_string());
     // weave the operators between the rels
     for (int i = 1; i < Rels.size(); i++) {
-      str_base->add_child(std::make_unique<StringCollection>("op=" + Operators[i - 1].lexeme));
-      str_base->add_child(Rels[i]->to_string());
+      str_base->AddChild(std::make_unique<StringCollection>("op=" + Operators[i - 1].lexeme));
+      str_base->AddChild(Rels[i]->to_string());
     }
     return str_base;
   };
@@ -1092,10 +1092,9 @@ public:
 // priority 6 subexpressions (&&)
 class TermASTnode : public ASTnode {
   std::vector<std::unique_ptr<EquivASTnode>> Equivs; // from left to right. non-empty
-  TOKEN Tok;
   // we void the Operators vector because we know the only operator is && and it is applied between each equiv in Equivs.
 public:
-  TermASTnode(TOKEN tok, std::vector<std::unique_ptr<EquivASTnode>> equivs) : Tok(tok), Equivs(std::move(equivs)) {}
+  TermASTnode(std::vector<std::unique_ptr<EquivASTnode>> equivs) : Equivs(std::move(equivs)) {}
   Value *codegen() override {
     Value *l = Equivs[0]->codegen();
     if (!l) return nullptr;
@@ -1103,17 +1102,17 @@ public:
     if (n == 1) return l;
     l = CastToBool(l);
     for (unsigned i = 1; i < n; i++) {
-      Value *r = Equivs[i]->codegen();
-      if (!r) return nullptr;
-      r = CastToBool(r);
-      l = Builder.CreateAnd(l, r, "andtmp");
+      if ((static_cast<ConstantInt *>(l))->isZero()) break;
+      l = Equivs[i]->codegen();
+      if (!l) return nullptr;
+      l = CastToBool(l);
     }
     return l;
   }
   std::unique_ptr<StringCollection> to_string() const override {
     auto str_base = std::make_unique<StringCollection>("term expr (&&)");
     for (int i = 0; i < Equivs.size(); i++) {
-      str_base->add_child(Equivs[i]->to_string());
+      str_base->AddChild(Equivs[i]->to_string());
     }
     return str_base;
   };
@@ -1122,10 +1121,9 @@ public:
 // priority 7 subexpressions (||)
 class RValASTnode : public ASTnode {
   std::vector<std::unique_ptr<TermASTnode>> Terms; // from left to right. non-empty
-  TOKEN Tok;
   // we void the Operators vector because we know the only operator is || and it is applied between each term in Terms.
 public:
-  RValASTnode(TOKEN tok, std::vector<std::unique_ptr<TermASTnode>> terms) : Tok(tok), Terms(std::move(terms)) {}
+  RValASTnode(std::vector<std::unique_ptr<TermASTnode>> terms) : Terms(std::move(terms)) {}
   Value *codegen() override {
     Value *l = Terms[0]->codegen();
     if (!l) return nullptr;
@@ -1133,17 +1131,17 @@ public:
     if (n == 1) return l;
     l = CastToBool(l);
     for (unsigned i = 1; i < n; i++) {
-      Value *r = Terms[i]->codegen();
-      if (!r) return nullptr;
-      r = CastToBool(r);
-      l = Builder.CreateOr(l, r, "ortmp");
+      if ((static_cast<ConstantInt *>(l))->isOne()) break;
+      l = Terms[i]->codegen();
+      if (!l) return nullptr;
+      l = CastToBool(l);
     }
     return l;
   }
   std::unique_ptr<StringCollection> to_string() const override {
     auto str_base = std::make_unique<StringCollection>("rval expr (||)");
     for (int i = 0; i < Terms.size(); i++) {
-      str_base->add_child(Terms[i]->to_string());
+      str_base->AddChild(Terms[i]->to_string());
     }
     return str_base;
   };
@@ -1153,10 +1151,8 @@ public:
 class AssignExprASTnode : public ExprASTnode {
   std::string Var_Name_Identifier;
   std::unique_ptr<ExprASTnode> Value_Expr;
-  TOKEN Tok;
-
 public:
-  AssignExprASTnode(TOKEN tok, std::string var_name_identifier, std::unique_ptr<ExprASTnode> value_expr) : Tok(tok), Var_Name_Identifier(std::move(var_name_identifier)), Value_Expr(std::move(value_expr)) {}
+  AssignExprASTnode(std::string var_name_identifier, std::unique_ptr<ExprASTnode> value_expr) : Var_Name_Identifier(std::move(var_name_identifier)), Value_Expr(std::move(value_expr)) {}
   Value *codegen() override {
     // Codegen the RHS.
     Value *Val = Value_Expr->codegen();
@@ -1164,18 +1160,23 @@ public:
 
     // lookup variable declaration, prioritising local over global
     if (NamedValues[Var_Name_Identifier]) {
-      // check type of RHS matches type of LHS
-      if (Val->getType() != NamedValues[Var_Name_Identifier]->getType()->getPointerElementType()) {
+      // attempt to upcast the value to the type of the variable
+      Value *upcast_val = UpCast(Val, NamedValues[Var_Name_Identifier]->getType()->getPointerElementType());
+      if (!upcast_val) {
         errs() << "RHS of assignment does not match type of LHS. " << Var_Name_Identifier ;
         return nullptr;
       }
+      Val = upcast_val;
       Builder.CreateStore(Val, NamedValues[Var_Name_Identifier]);
     }
     else if (GlobalNamedValues[Var_Name_Identifier]) {
-      if (Val->getType() != GlobalNamedValues[Var_Name_Identifier]->getType()->getPointerElementType()) {
-        errs() << "RHS of assignment does not match type of LHS. " << Var_Name_Identifier;
+      // attempt to upcast the value to the type of the variable
+      Value *upcast_val = UpCast(Val, GlobalNamedValues[Var_Name_Identifier]->getType()->getPointerElementType());
+      if (!upcast_val) {
+        errs() << "RHS of assignment does not match type of LHS. " << Var_Name_Identifier ;
         return nullptr;
       }
+      Val = upcast_val;
       Builder.CreateStore(Val, GlobalNamedValues[Var_Name_Identifier]);
     }
     else {
@@ -1187,10 +1188,10 @@ public:
   }
   std::unique_ptr<StringCollection> to_string() const override {
     auto str_base = std::make_unique<StringCollection>("assign expr (=)");
-    str_base->add_child(std::make_unique<StringCollection>("varName=" + Var_Name_Identifier));
+    str_base->AddChild(std::make_unique<StringCollection>("varName=" + Var_Name_Identifier));
     auto value_base = std::make_unique<StringCollection>("value");
-    value_base->add_child(Value_Expr->to_string());
-    str_base->add_child(std::move(value_base));
+    value_base->AddChild(Value_Expr->to_string());
+    str_base->AddChild(std::move(value_base));
     return str_base;
   };
 };
@@ -1198,62 +1199,67 @@ public:
 // priority 8 [least] rval delegation subexpression
 class RValExprASTnode : public ExprASTnode {
   std::unique_ptr<RValASTnode> RVal;
-  TOKEN Tok;
 
 public:
-  RValExprASTnode(TOKEN tok, std::unique_ptr<RValASTnode> rval) : Tok(tok), RVal(std::move(rval)) {}
+  RValExprASTnode(std::unique_ptr<RValASTnode> rval) : RVal(std::move(rval)) {}
   Value *codegen() override {
     return RVal->codegen();
   }
   std::unique_ptr<StringCollection> to_string() const override {
     auto str_base = std::make_unique<StringCollection>("rval delegation expr");
-    str_base->add_child(RVal->to_string());
+    str_base->AddChild(RVal->to_string());
     return str_base;
   };
 };
 
+enum class StmtType {Base, Expr, Block, If, While, Return};
+
 // Base class for stmt
 class StmtASTnode : public ASTnode {
-
 public:
   virtual ~StmtASTnode() {}
+  virtual StmtType type() const {
+    return StmtType::Base;
+  }
 };
 
 class ExprStmtASTnode : public StmtASTnode {
-  TOKEN Tok;
-
 public:
   std::unique_ptr<ExprASTnode> Expr; // may be null
-  ExprStmtASTnode(TOKEN tok, std::unique_ptr<ExprASTnode> expr) : Tok(tok), Expr(std::move(expr)) {}
+  ExprStmtASTnode(std::unique_ptr<ExprASTnode> expr) : Expr(std::move(expr)) {}
   Value *codegen() override {
     if (Expr) return Expr->codegen();
     return 0; // don't return null because this is not an error
   }
   std::unique_ptr<StringCollection> to_string() const override {
     auto str_base = std::make_unique<StringCollection>("expr statement");
-    if (Expr) str_base->add_child(Expr->to_string());
+    if (Expr) str_base->AddChild(Expr->to_string());
     return str_base;
   };
+  StmtType type() const override {
+    return StmtType::Expr;
+  }
 };
 
 class ReturnStmtASTnode : public StmtASTnode {
   std::unique_ptr<ExprStmtASTnode> Return_Expr_Stmt;
-  TOKEN Tok;
 
 public:
-  ReturnStmtASTnode(TOKEN tok, std::unique_ptr<ExprStmtASTnode> return_expr_stmt): Tok(tok), Return_Expr_Stmt(std::move(return_expr_stmt)) {}
+  ReturnStmtASTnode(std::unique_ptr<ExprStmtASTnode> return_expr_stmt): Return_Expr_Stmt(std::move(return_expr_stmt)) {}
   Value *codegen() override {
-    // TODO: check type(return_val) = type(return type of cur function)
     Function *TheFunction = Builder.GetInsertBlock()->getParent();
     Type *return_type = TheFunction->getReturnType();
 
     if (Return_Expr_Stmt->Expr) { // have a return value
       // evaluate return value
       Value *return_val = Return_Expr_Stmt->Expr->codegen();
-      if (return_val->getType() != return_type) {
-        errs() << "Type of expression does not match the return type of the function.";
+      // attempt to upcast the return val to the return type of the function
+      Value *upcast_return_val = UpCast(return_val, return_type);
+      if (!upcast_return_val) {
+        errs() << "Return expression does not match return type of function.";
         return nullptr;
       }
+      return_val = upcast_return_val;
       return Builder.CreateRet(return_val);
     }
     else { // no return value - return void
@@ -1266,18 +1272,20 @@ public:
   }
   std::unique_ptr<StringCollection> to_string() const override {
     auto str_base = std::make_unique<StringCollection>("return statement");
-    str_base->add_child(Return_Expr_Stmt->to_string());
+    str_base->AddChild(Return_Expr_Stmt->to_string());
     return str_base;
   };
+  StmtType type() const override {
+    return StmtType::Return;
+  }
 };
 
 class BlockASTnode : public StmtASTnode {
   std::vector<std::unique_ptr<VarDeclASTnode>> Local_Decls;
-  std::vector<std::unique_ptr<StmtASTnode>> Stmts;
-  TOKEN Tok;
 
 public:
-  BlockASTnode(TOKEN tok, std::vector<std::unique_ptr<VarDeclASTnode>> local_decls, std::vector<std::unique_ptr<StmtASTnode>> stmts) : Tok(tok), Local_Decls(std::move(local_decls)), Stmts(std::move(stmts)) {}
+  std::vector<std::unique_ptr<StmtASTnode>> Stmts;
+  BlockASTnode(std::vector<std::unique_ptr<VarDeclASTnode>> local_decls, std::vector<std::unique_ptr<StmtASTnode>> stmts) : Local_Decls(std::move(local_decls)), Stmts(std::move(stmts)) {}
   Value *codegen() override {
     // return the return value
     // TODO: in function decl check block contains a return stmt, or that all of its block otherwise issue
@@ -1310,12 +1318,12 @@ public:
       if (!Local_Decls[i]->codegen()) return nullptr;
     }
 
-    // // codegen each declaration
-    // for (auto&& decl : Local_Decls) {
-    //   if (!decl->codegen()) {
-    //     return nullptr; // propogate
-    //   }
-    // }
+    // codegen each declaration
+    for (auto&& decl : Local_Decls) {
+      if (!decl->codegen()) {
+        return nullptr; // propogate
+      }
+    }
 
     // codegen each statement
     for (auto&& stmt : Stmts) {
@@ -1350,31 +1358,37 @@ public:
     auto str_base = std::make_unique<StringCollection>("block");
     auto local_decls_base = std::make_unique<StringCollection>("local decls");
     for (auto&& local_decl : Local_Decls) {
-      local_decls_base->add_child(local_decl->to_string());
+      local_decls_base->AddChild(local_decl->to_string());
     }
-    str_base->add_child(std::move(local_decls_base));
+    str_base->AddChild(std::move(local_decls_base));
     auto stmts_base = std::make_unique<StringCollection>("statements");
     for (auto&& stmt : Stmts) {
-      stmts_base->add_child(stmt->to_string());
+      stmts_base->AddChild(stmt->to_string());
     }
-    str_base->add_child(std::move(stmts_base));
+    str_base->AddChild(std::move(stmts_base));
     return str_base;
   };
+  StmtType type() const override {
+    return StmtType::Block;
+  }
 };
 
 class IfStmtASTnode : public StmtASTnode {
   std::unique_ptr<ExprASTnode> Condition_Expr;
-  std::unique_ptr<BlockASTnode> If_Body;
-  std::unique_ptr<BlockASTnode> Else_Body; // may be null for no else
-  TOKEN Tok;
 
 public:
-  IfStmtASTnode(TOKEN tok, std::unique_ptr<ExprASTnode> condition_expr, std::unique_ptr<BlockASTnode> if_body, std::unique_ptr<BlockASTnode> else_body): Tok(tok), Condition_Expr(std::move(condition_expr)), If_Body(std::move(if_body)), Else_Body(std::move(else_body)) {}
+  std::unique_ptr<BlockASTnode> If_Body;
+  std::unique_ptr<BlockASTnode> Else_Body; // may be null for no else
+  IfStmtASTnode(std::unique_ptr<ExprASTnode> condition_expr, std::unique_ptr<BlockASTnode> if_body, std::unique_ptr<BlockASTnode> else_body): Condition_Expr(std::move(condition_expr)), If_Body(std::move(if_body)), Else_Body(std::move(else_body)) {}
   Value *codegen() override {
     Value *CondV = Condition_Expr->codegen();
     if (!CondV)
       return nullptr;
 
+    if (CondV->getType()->isVoidTy()) { // can never be cast to a bool, error
+      errs() << "Void condition in if.";
+      return nullptr;
+    }
     // Convert condition to a bool by comparing non-equal to 0.0.
     CondV = CastToBool(CondV);
     // Builder.CreateFCmpONE(
@@ -1417,27 +1431,29 @@ public:
   std::unique_ptr<StringCollection> to_string() const override {
     auto str_base = std::make_unique<StringCollection>("if statement");
     auto condition_base = std::make_unique<StringCollection>("condition");
-    condition_base->add_child(Condition_Expr->to_string());
-    str_base->add_child(std::move(condition_base));
+    condition_base->AddChild(Condition_Expr->to_string());
+    str_base->AddChild(std::move(condition_base));
     auto if_body_base = std::make_unique<StringCollection>("if body:");
-    if_body_base->add_child(If_Body->to_string());
-    str_base->add_child(std::move(if_body_base));
+    if_body_base->AddChild(If_Body->to_string());
+    str_base->AddChild(std::move(if_body_base));
     if (Else_Body) {
       auto else_body_base = std::make_unique<StringCollection>("else body:");
-      else_body_base->add_child(Else_Body->to_string());
-      str_base->add_child(std::move(else_body_base));
+      else_body_base->AddChild(Else_Body->to_string());
+      str_base->AddChild(std::move(else_body_base));
     }
     return str_base;
   };
+  StmtType type() const override {
+    return StmtType::If;
+  }
 };
 
 class WhileStmtASTnode : public StmtASTnode {
   std::unique_ptr<ExprASTnode> Condition_Expr;
   std::unique_ptr<StmtASTnode> Body_Stmt;
-  TOKEN Tok;
 
 public:
-  WhileStmtASTnode(TOKEN tok, std::unique_ptr<ExprASTnode> condition_expr, std::unique_ptr<StmtASTnode> body_stmt): Tok(tok), Condition_Expr(std::move(condition_expr)), Body_Stmt(std::move(body_stmt)) {}
+  WhileStmtASTnode(std::unique_ptr<ExprASTnode> condition_expr, std::unique_ptr<StmtASTnode> body_stmt): Condition_Expr(std::move(condition_expr)), Body_Stmt(std::move(body_stmt)) {}
   Value *codegen() override {
     Function *TheFunction = Builder.GetInsertBlock()->getParent();
 
@@ -1454,6 +1470,11 @@ public:
     Value *CondV = Condition_Expr->codegen();
     if (!CondV)
       return nullptr;
+
+    if (CondV->getType()->isVoidTy()) { // can never be cast to a bool, error
+      errs() << "Void condition in while.";
+      return nullptr;
+    }
 
     // Convert condition to a bool by comparing non-equal to 0.0.
     CondV = CastToBool(CondV);
@@ -1483,14 +1504,34 @@ public:
   std::unique_ptr<StringCollection> to_string() const override {
     auto str_base = std::make_unique<StringCollection>("while statement");
     auto condition_base = std::make_unique<StringCollection>("condition");
-    condition_base->add_child(Condition_Expr->to_string());
-    str_base->add_child(std::move(condition_base));
+    condition_base->AddChild(Condition_Expr->to_string());
+    str_base->AddChild(std::move(condition_base));
     auto body_base = std::make_unique<StringCollection>("body");
-    body_base->add_child(Body_Stmt->to_string());
-    str_base->add_child(std::move(body_base));
+    body_base->AddChild(Body_Stmt->to_string());
+    str_base->AddChild(std::move(body_base));
     return str_base;
   };
+  StmtType type() const override {
+    return StmtType::While;
+  }
 };
+
+bool GotReturnFromAllPaths(BlockASTnode* body) {
+  for (auto&& stmt : body->Stmts) {
+    auto stmt_type = stmt->type();
+    if (stmt_type == StmtType::Return) return true;
+    if (stmt_type == StmtType::Block) {
+      auto block_stmt = static_cast<BlockASTnode*>(stmt.get());
+      if (GotReturnFromAllPaths(block_stmt)) return true;
+    }
+    if (stmt_type == StmtType::If) {
+      auto if_stmt = static_cast<IfStmtASTnode*>(stmt.get());
+      if (!if_stmt->Else_Body) continue;
+      if (GotReturnFromAllPaths(if_stmt->If_Body.get()) && GotReturnFromAllPaths(if_stmt->Else_Body.get())) return true;
+    }
+  }
+  return false;
+}
 
 // may contain void
 class FunDeclASTnode : public ASTnode {
@@ -1498,10 +1539,9 @@ class FunDeclASTnode : public ASTnode {
   std::string Name;
   std::unique_ptr<ParamsASTnode> Params;
   std::unique_ptr<BlockASTnode> Body; // Block
-  TOKEN Tok;
 
 public:
-  FunDeclASTnode(TOKEN tok, TOKEN return_type, std::string name, std::unique_ptr<ParamsASTnode> params, std::unique_ptr<BlockASTnode> body) : Tok(tok), Return_Type(return_type), Name(name), Params(std::move(params)), Body(std::move(body)) {}
+  FunDeclASTnode(TOKEN return_type, std::string name, std::unique_ptr<ParamsASTnode> params, std::unique_ptr<BlockASTnode> body) : Return_Type(return_type), Name(name), Params(std::move(params)), Body(std::move(body)) {}
   Value *codegen() override {
     // Make the function type:  double(double,double) etc.
     std::vector<llvm::Type *> args_types;
@@ -1556,18 +1596,26 @@ public:
     }
 
     if (Value *RetVal = Body->codegen()) {
-      std::cout << "\nFUNCTION codegened body\n";
-      // Finish off the function.
-     // TODO: figure out of this is needed - Builder.CreateRet(RetVal);
+      // RETURN CHECK: Check that all code paths eventually have a return.
+      // rec: if return type is not void, check current block has a return. if not, check current block has an if and an else, both containing returns (recursively). otherwise we have no return thus error.
+      if (Return_Type.type != VOID_TOK && !GotReturnFromAllPaths(Body.get())) {
+        errs() << "Not all code paths return a value.";
+        return nullptr; 
+      }
+
       // Validate the generated code, checking for consistency.
       verifyFunction(*TheFunction);
 
-      std::cout << "\nFUNCTION codegened body and done verification\n";
+      // add void return if a void function
+      if (return_type->isVoidTy()) {
+        Builder.CreateRetVoid();
+      }
+      else {
+        Builder.CreateRet(GetTypeDefaultVal(return_type));
+      }
 
       return TheFunction;
     }
-
-    std::cout << "\nFUNCTION failed to codegen body\n";
 
     // Error reading body, remove function.
     TheFunction->eraseFromParent();
@@ -1575,12 +1623,12 @@ public:
   }
   std::unique_ptr<StringCollection> to_string() const override {
     auto str_base = std::make_unique<StringCollection>("function declaration");
-    str_base->add_child(std::make_unique<StringCollection>("returnType=" + Return_Type.lexeme));
-    str_base->add_child(std::make_unique<StringCollection>("name=" + Name));
-    str_base->add_child(Params->to_string());
+    str_base->AddChild(std::make_unique<StringCollection>("returnType=" + Return_Type.lexeme));
+    str_base->AddChild(std::make_unique<StringCollection>("name=" + Name));
+    str_base->AddChild(Params->to_string());
     auto body_base = std::make_unique<StringCollection>("body");
-    body_base->add_child(Body->to_string());
-    str_base->add_child(std::move(body_base));
+    body_base->AddChild(Body->to_string());
+    str_base->AddChild(std::move(body_base));
     return str_base;
   };
 };
@@ -1589,15 +1637,14 @@ class DeclASTnode : public ASTnode {
   std::unique_ptr<VarDeclASTnode> Var_Decl;
   std::unique_ptr<FunDeclASTnode> Fun_Decl;
   bool Is_Var_Decl;
-  TOKEN Tok;
 public:
-  DeclASTnode(TOKEN tok, std::unique_ptr<VarDeclASTnode> var_decl, std::unique_ptr<FunDeclASTnode> fun_decl, bool is_var_decl) : Tok(tok), Var_Decl(std::move(var_decl)), Fun_Decl(std::move(fun_decl)), Is_Var_Decl(is_var_decl) {}
+  DeclASTnode(std::unique_ptr<VarDeclASTnode> var_decl, std::unique_ptr<FunDeclASTnode> fun_decl, bool is_var_decl) : Var_Decl(std::move(var_decl)), Fun_Decl(std::move(fun_decl)), Is_Var_Decl(is_var_decl) {}
   Value *codegen() override {
     return Is_Var_Decl ? Var_Decl->codegen() : Fun_Decl->codegen();
   }
   std::unique_ptr<StringCollection> to_string() const override {
     auto str_base = std::make_unique<StringCollection>("declaration");
-    str_base->add_child(Is_Var_Decl ? Var_Decl->to_string() : Fun_Decl->to_string());
+    str_base->AddChild(Is_Var_Decl ? Var_Decl->to_string() : Fun_Decl->to_string());
     return str_base;
   };
 };
@@ -1605,9 +1652,8 @@ public:
 class ProgramASTnode : public ASTnode {
   std::vector<std::unique_ptr<ExternASTnode>> Extern_List;
   std::vector<std::unique_ptr<DeclASTnode>> Decl_List;
-  TOKEN Tok;
 public:
-  ProgramASTnode(TOKEN tok, std::vector<std::unique_ptr<ExternASTnode>> extern_list, std::vector<std::unique_ptr<DeclASTnode>> decl_list) : Tok(tok), Extern_List(std::move(extern_list)), Decl_List(std::move(decl_list)) {}
+  ProgramASTnode(std::vector<std::unique_ptr<ExternASTnode>> extern_list, std::vector<std::unique_ptr<DeclASTnode>> decl_list) : Extern_List(std::move(extern_list)), Decl_List(std::move(decl_list)) {}
   Value *codegen() override {
     // codegen each extern and decl
     for (auto&& externn : Extern_List) {
@@ -1616,20 +1662,20 @@ public:
     for (auto&& decl : Decl_List) {
       if (!decl->codegen()) return nullptr;
     }
-    return 0;
+    return Constant::getNullValue(Type::getInt1Ty(TheContext));
   }
   std::unique_ptr<StringCollection> to_string() const override {
     auto str_base = std::make_unique<StringCollection>("program");
     auto externs_base = std::make_unique<StringCollection>("externs");
     for (auto&& externn : Extern_List) {
-      externs_base->add_child(externn->to_string());
+      externs_base->AddChild(externn->to_string());
     }
-    str_base->add_child(std::move(externs_base));
+    str_base->AddChild(std::move(externs_base));
     auto decls_base = std::make_unique<StringCollection>("declarations");
     for (auto&& decl : Decl_List) {
-      decls_base->add_child(decl->to_string());
+      decls_base->AddChild(decl->to_string());
     }
-    str_base->add_child(std::move(decls_base));
+    str_base->AddChild(std::move(decls_base));
     return str_base;
   };
 };
@@ -1682,7 +1728,7 @@ std::unique_ptr<ParamASTnode> ParseParam() {
   auto name = IdentifierStr;
   getNextToken();
 
-  return std::make_unique<ParamASTnode>(CurTok, type, name);
+  return std::make_unique<ParamASTnode>(type, name);
 }
 
 /* params ::= param_list  
@@ -1703,15 +1749,15 @@ std::unique_ptr<ParamsASTnode> ParseParams() {
       auto param = ParseParam();
       param_list.push_back(std::move(param));
     }
-    return std::make_unique<ParamsASTnode>(CurTok, false, std::move(param_list));
+    return std::make_unique<ParamsASTnode>(false, std::move(param_list));
   }
   if (CurTok.type == VOID_TOK) { // is just void
     // eat void
     getNextToken();
-    return std::make_unique<ParamsASTnode>(CurTok, true, std::move(std::vector<std::unique_ptr<ParamASTnode>>()));
+    return std::make_unique<ParamsASTnode>(true, std::move(std::vector<std::unique_ptr<ParamASTnode>>()));
   }
   if (CurTok.type == RPAR) { // current token is in follow of params, thus do nothing but is still valid production
-    return std::make_unique<ParamsASTnode>(CurTok, false, std::move(std::vector<std::unique_ptr<ParamASTnode>>()));
+    return std::make_unique<ParamsASTnode>(false, std::move(std::vector<std::unique_ptr<ParamASTnode>>()));
   }
   PrintParserError("Expected params to be either a list of param declarations, 'void', or empty, but is neither.");
   return nullptr;
@@ -1737,7 +1783,7 @@ std::unique_ptr<VarDeclASTnode> ParseVarDecl() {
   }
   getNextToken();
 
-  return std::make_unique<VarDeclASTnode>(CurTok, type, name);
+  return std::make_unique<VarDeclASTnode>(type, name);
 }
 
 std::unique_ptr<BlockASTnode> ParseBlock(); // forward declaring ParseBlock due to cyclic dependency between ParseFunDecl and ParseBlock
@@ -2076,7 +2122,7 @@ std::unique_ptr<ExternASTnode> ParseExtern() {
   }
   // eat ';'
   getNextToken();
-  return std::make_unique<ExternASTnode>(CurTok, std::move(type_spec), identifier, std::move(params));
+  return std::make_unique<ExternASTnode>(std::move(type_spec), identifier, std::move(params));
 }
 
 /* extern_list ::= extern extern_list
@@ -2114,7 +2160,7 @@ std::unique_ptr<ArgListASTnode> ParseArgs() {
     auto expr = ParseExpr();
     args_expr_list.push_back(std::move(expr));
   }
-  return std::make_unique<ArgListASTnode>(CurTok, std::move(args_expr_list));
+  return std::make_unique<ArgListASTnode>(std::move(args_expr_list));
 }
 
 // element ::= "-" element | "!" element | "(" expr ")" | IDENT | IDENT "(" args ")" | INT_LIT | FLOAT_LIT | BOOL_LIT
@@ -2329,7 +2375,7 @@ std::unique_ptr<RValASTnode> ParseRVal() {
 }
 
 // program ::= extern_list decl_list | decl_list
-std::unique_ptr<ASTnode> ParseProgram() {
+std::unique_ptr<ProgramASTnode> ParseProgram() {
   std::vector<TOKEN_TYPE> decl_list_first = {INT_TOK, FLOAT_TOK, BOOL_TOK, VOID_TOK};
   std::vector<std::unique_ptr<ExternASTnode>> extern_list = CurTok.type == EXTERN ? ParseExternList() : std::vector<std::unique_ptr<ExternASTnode>>();
   if (TokenContains(decl_list_first, CurTok.type)) {
@@ -2342,13 +2388,12 @@ std::unique_ptr<ASTnode> ParseProgram() {
   return nullptr;
 }
 
-std::unique_ptr<ASTnode> ast;
+std::unique_ptr<ProgramASTnode> ast;
 
 // program ::= extern_list decl_list | decl_list
 static void parser() {
   ast = ParseProgram();
-  std::cout << ast->to_string()->to_string(2,2);
-  ast->codegen();
+  std::cout << ast->to_string()->ToString(2,2);
 }
 
 //===----------------------------------------------------------------------===//
@@ -2357,7 +2402,7 @@ static void parser() {
 
 inline llvm::raw_ostream &operator<<(llvm::raw_ostream &os,
                                      const ASTnode &ast) {
-  os << ast.to_string()->to_string(2,2);
+  os << ast.to_string()->ToString(2,2);
   // os << "use above when doing";
   return os;
 }
@@ -2395,6 +2440,10 @@ int main(int argc, char **argv) {
   // Run the parser now.
   parser();
   fprintf(stderr, "Parsing Finished\n");
+
+  if (!ast->codegen()) {
+    return 1;
+  }
 
   //********************* Start printing final IR **************************
   // Print out all of the generated code into a file called output.ll
